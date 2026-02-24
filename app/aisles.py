@@ -136,11 +136,14 @@ AISLE_MAP = {
 def lookup_aisle_local(name: str) -> str | None:
     """Check local map first. Returns aisle string or None."""
     key = name.lower().strip()
+    # Exact match first
     if key in AISLE_MAP:
         return AISLE_MAP[key]
-    # Try partial match — if any key is contained in the item name
+    # Whole word match with simple singular/plural handling
+    key_words = set(w.rstrip('s') for w in key.split())
     for map_key, aisle in AISLE_MAP.items():
-        if map_key in key:
+        map_words = set(w.rstrip('s') for w in map_key.split())
+        if map_words.issubset(key_words):
             return aisle
     return None
 
