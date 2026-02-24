@@ -86,13 +86,6 @@ async def import_recipe(req: RecipeImportRequest, session: Session = Depends(get
 
     data = await extract_recipe(req.url, req.servings_override)
 
-    # Title duplicate check as fallback
-    title_match = session.exec(
-        select(Recipe).where(Recipe.title == data["title"])
-    ).first()
-    if title_match:
-        raise HTTPException(400, detail=f"Recipe already exists: {title_match.title}")
-
     recipe = Recipe(
         url=req.url,
         title=data["title"],
