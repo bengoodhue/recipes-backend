@@ -107,6 +107,8 @@ def from_base_to_readable(amount: float, family: str) -> tuple[float, str]:
 
 def format_quantity(amount: float, unit: str) -> str:
     """Format a quantity nicely, converting fractions where appropriate."""
+    if amount is None:
+        return unit.strip()
     # Common fraction display
     frac_map = {0.25: "¼", 0.5: "½", 0.75: "¾", 0.33: "⅓", 0.67: "⅔"}
     whole = int(amount)
@@ -158,7 +160,7 @@ class IngredientGroup:
         ])
         return active > 1
 
-    def to_display_items(self) -> list[dict]:
+def to_display_items(self) -> list[dict]:
         """Return one or more display line items for this ingredient."""
         items = []
         if self.volume_base > 0:
@@ -168,11 +170,18 @@ class IngredientGroup:
             amt, unit = from_base_to_readable(self.weight_base, "weight")
             items.append({"amount": amt, "unit": unit, "display_quantity": format_quantity(amt, unit)})
         for amt, unit in self.count_amounts:
-            items.append({"amount": amt, "unit": unit, "display_quantity": format_quantity(amt, unit)})
+            if amt is not None:
+                items.append({"amount": amt, "unit": unit, "display_quantity": format_quantity(amt, unit)})
+            else:
+                items.append({"amount": None, "unit": unit, "display_quantity": unit.strip()})
         if not items:
             for e in self.unknown_entries:
-                items.append({"amount": e["amount"], "unit": e["unit"],
-                               "display_quantity": format_quantity(e["amount"], e["unit"])})
+                if e["amount"] is not None:
+                    items.append({"amount": e["amount"], "unit": e["unit"],
+                                   "display_quantity": format_quantity(e["amount"], e["unit"])})
+                else:
+                    items.append({"amount": None, "unit": e["unit"],
+                                   "display_quantity": e["unit"].strip() or ""})
         return items
 
 
