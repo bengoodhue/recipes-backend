@@ -23,8 +23,25 @@ async def extract_recipe(url: str, servings_override: Optional[int] = None) -> d
 
     async with httpx.AsyncClient(timeout=15.0) as client:
         resp = await client.get(f"{SPOONACULAR_BASE}/recipes/extract", params=params)
-        resp.raise_for_status()
+
+        if resp.status_code != 200:
+            # Surface the actual Spoonacular error message
+            try:
+                error_data = resp.json()
+                msg = error_data.get("message") or error_data.get("status") or f"HTTP {resp.status_code}"
+            except Exception:
+                msg = f"HTTP {resp.status_code}"
+            raise ValueError(f"Spoonacular could not import this recipe: {msg}")
+
         data = resp.json()
+
+    # Check if Spoonacular returned an empty/unusable result
+    if not data.get("extendedIngredients"):
+        title = data.get("title", "")
+        if title:
+            raise ValueError(f"Spoonacular found the page but could not extract ingredients from it. Try entering the recipe manually.")
+        else:
+            raise ValueError(f"Spoonacular could not read this page. The site may be blocking recipe extraction. Try entering the recipe manually.")
 
     servings = servings_override or data.get("servings", 4)
     original_servings = data.get("servings", 4)

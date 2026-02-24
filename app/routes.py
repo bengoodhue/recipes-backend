@@ -151,7 +151,10 @@ async def import_recipe(req: RecipeImportRequest, session: Session = Depends(get
         if _normalize_url(r.url) == normalized:
             raise HTTPException(400, detail=f"Recipe already exists: {r.title}")
 
-    data = await extract_recipe(req.url, req.servings_override)
+    try:
+        data = await extract_recipe(req.url, req.servings_override)
+    except ValueError as e:
+        raise HTTPException(400, detail=str(e))
 
     # Title duplicate check as fallback
     title_match = session.exec(
