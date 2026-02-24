@@ -11,6 +11,7 @@ from .models import (Recipe, Tag, RecipeTagLink, ShoppingList,
 from .spoonacular import extract_recipe
 from .units import aggregate_ingredients
 from .database import get_session
+from .aisles import lookup_aisle
 
 router = APIRouter()  # v2
 
@@ -85,6 +86,13 @@ async def import_recipe(req: RecipeImportRequest, session: Session = Depends(get
             raise HTTPException(400, detail=f"Recipe already exists: {r.title}")
 
     data = await extract_recipe(req.url, req.servings_override)
+
+    # Title duplicate check as fallback
+    title_match = session.exec(
+        select(Recipe).where(Recipe.title == data["title"])
+    ).first()
+    if title_match:
+        raise HTTPException(400, detail=f"Recipe already exists: {title_match.title}")
 
     recipe = Recipe(
         url=req.url,
@@ -280,14 +288,15 @@ def remove_recipe_from_list(list_id: int, recipe_id: int, session: Session = Dep
 
 
 @router.post("/lists/{list_id}/items")
-def add_manual_item(list_id: int, req: AddManualItemRequest, session: Session = Depends(get_session)):
+async def add_manual_item(list_id: int, req: AddManualItemRequest, session: Session = Depends(get_session)):
+    aisle = req.aisle or await lookup_aisle(req.name)
     item = ShoppingListItem(
         shopping_list_id=list_id,
         name=req.name,
         display_quantity=req.display_quantity,
         unit=req.unit,
         amount=req.amount,
-        aisle=req.aisle,
+        aisle=aisle,
         is_manual=True,
     )
     session.add(item)
