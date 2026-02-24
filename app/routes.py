@@ -391,11 +391,28 @@ def _list_response(lst: ShoppingList, session: Session) -> dict:
     links = session.exec(
         select(ShoppingListRecipeLink).where(ShoppingListRecipeLink.shopping_list_id == lst.id)
     ).all()
-    recipe_ids = [l.recipe_id for l in links]
+    
+    recipes = []
+    for link in links:
+        recipe = session.get(Recipe, link.recipe_id)
+        if recipe:
+            tags = session.exec(
+                select(Tag).join(RecipeTagLink).where(RecipeTagLink.recipe_id == recipe.id)
+            ).all()
+            recipes.append({
+                "id": recipe.id,
+                "title": recipe.title,
+                "image_url": recipe.image_url,
+                "servings": link.servings_override or recipe.servings,
+                "ready_in_minutes": recipe.ready_in_minutes,
+                "rating": recipe.rating,
+                "tags": [t.name for t in tags],
+            })
+
     return {
         **_list_summary(lst),
         "items": [_item_dict(i) for i in items],
-        "recipe_ids": recipe_ids,
+        "recipes": recipes,
     }
 
 
