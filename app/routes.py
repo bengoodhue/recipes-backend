@@ -427,7 +427,7 @@ def _rebuild_list_items(list_id: int, session: Session):
         ings = recipe.ingredients
         if link.servings_override and recipe.servings:
             scale = link.servings_override / recipe.servings
-            ings = [{**i, "amount": i["amount"] * scale} for i in ings]
+            ings = [{**i, "amount": (i["amount"] * scale if i.get("amount") is not None else None)} for i in ings]
         ingredient_lists.append(ings)
         recipe_ids.append(link.recipe_id)
 
