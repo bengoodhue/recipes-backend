@@ -160,7 +160,7 @@ class IngredientGroup:
         ])
         return active > 1
 
-def to_display_items(self) -> list[dict]:
+    def to_display_items(self) -> list[dict]:
         """Return one or more display line items for this ingredient."""
         items = []
         if self.volume_base > 0:
