@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlmodel import Session, select
 from typing import Optional
 from pydantic import BaseModel
+from urllib.parse import urlparse
 import json
 from datetime import datetime
 
@@ -11,7 +12,17 @@ from .spoonacular import extract_recipe
 from .units import aggregate_ingredients
 from .database import get_session
 
-router = APIRouter() # v2
+router = APIRouter()  # v2
+
+
+# ─── Helpers ──────────────────────────────────────────────────────────────────
+
+def _normalize_url(url: str) -> str:
+    """Normalize a URL for duplicate detection."""
+    parsed = urlparse(url.lower().strip())
+    host = parsed.netloc.replace("www.", "")
+    path = parsed.path.rstrip("/")
+    return f"{host}{path}"
 
 
 # ─── Pydantic request/response models ────────────────────────────────────────
@@ -65,7 +76,22 @@ def tag_suggestions(q: str = Query(""), session: Session = Depends(get_session))
 @router.post("/recipes/import")
 async def import_recipe(req: RecipeImportRequest, session: Session = Depends(get_session)):
     """Extract a recipe from a URL via Spoonacular and save it."""
+
+    # Duplicate check on normalized URL
+    normalized = _normalize_url(req.url)
+    existing_recipes = session.exec(select(Recipe)).all()
+    for r in existing_recipes:
+        if _normalize_url(r.url) == normalized:
+            raise HTTPException(400, detail=f"Recipe already exists: {r.title}")
+
     data = await extract_recipe(req.url, req.servings_override)
+
+    # Title duplicate check as fallback
+    title_match = session.exec(
+        select(Recipe).where(Recipe.title == data["title"])
+    ).first()
+    if title_match:
+        raise HTTPException(400, detail=f"Recipe already exists: {title_match.title}")
 
     recipe = Recipe(
         url=req.url,
@@ -82,7 +108,7 @@ async def import_recipe(req: RecipeImportRequest, session: Session = Depends(get
         ingredients_json=json.dumps(data["ingredients"]),
     )
     session.add(recipe)
-    session.flush()  # get recipe.id before committing
+    session.flush()
 
     # Merge requested tags + auto tags from Spoonacular
     all_tag_names = list(set(req.tags + data.get("auto_tags", [])))
@@ -133,7 +159,6 @@ def update_recipe(recipe_id: int, req: RecipeUpdateRequest, session: Session = D
     if req.servings is not None:
         recipe.servings = req.servings
     if req.tags is not None:
-        # Remove existing tag links
         existing = session.exec(select(RecipeTagLink).where(RecipeTagLink.recipe_id == recipe_id)).all()
         for link in existing:
             session.delete(link)
@@ -155,7 +180,6 @@ def delete_recipe(recipe_id: int, session: Session = Depends(get_session)):
     recipe = session.get(Recipe, recipe_id)
     if not recipe:
         raise HTTPException(404, "Recipe not found")
-    # Remove any list links first
     links = session.exec(
         select(ShoppingListRecipeLink)
         .where(ShoppingListRecipeLink.recipe_id == recipe_id)
@@ -223,7 +247,6 @@ def add_recipe_to_list(list_id: int, req: AddRecipeToListRequest, session: Sessi
     if not recipe:
         raise HTTPException(404, "Recipe not found")
 
-    # Check not already added
     existing = session.exec(
         select(ShoppingListRecipeLink)
         .where(ShoppingListRecipeLink.shopping_list_id == list_id)
@@ -311,7 +334,6 @@ def delete_item(list_id: int, item_id: int, session: Session = Depends(get_sessi
 
 def _rebuild_list_items(list_id: int, session: Session):
     """Delete non-manual items and re-aggregate from all recipes on the list."""
-    # Remove existing recipe-derived items
     existing_items = session.exec(
         select(ShoppingListItem)
         .where(ShoppingListItem.shopping_list_id == list_id)
@@ -321,7 +343,6 @@ def _rebuild_list_items(list_id: int, session: Session):
         session.delete(item)
     session.flush()
 
-    # Get all recipe links
     links = session.exec(
         select(ShoppingListRecipeLink).where(ShoppingListRecipeLink.shopping_list_id == list_id)
     ).all()
@@ -336,7 +357,6 @@ def _rebuild_list_items(list_id: int, session: Session):
         if not recipe:
             continue
         ings = recipe.ingredients
-        # Scale if servings override
         if link.servings_override and recipe.servings:
             scale = link.servings_override / recipe.servings
             ings = [{**i, "amount": i["amount"] * scale} for i in ings]
@@ -391,7 +411,7 @@ def _list_response(lst: ShoppingList, session: Session) -> dict:
     links = session.exec(
         select(ShoppingListRecipeLink).where(ShoppingListRecipeLink.shopping_list_id == lst.id)
     ).all()
-    
+
     recipes = []
     for link in links:
         recipe = session.get(Recipe, link.recipe_id)
