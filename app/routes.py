@@ -11,7 +11,7 @@ from .spoonacular import extract_recipe
 from .units import aggregate_ingredients
 from .database import get_session
 
-router = APIRouter()
+router = APIRouter() # v2
 
 
 # ─── Pydantic request/response models ────────────────────────────────────────
