@@ -12,6 +12,7 @@ from .spoonacular import extract_recipe
 from .units import aggregate_ingredients
 from .database import get_session
 from .aisles import lookup_aisle
+from .parser import parse_ingredient_block
 
 router = APIRouter()  # v2
 
@@ -62,6 +63,17 @@ class UpdateItemRequest(BaseModel):
     display_quantity: Optional[str] = None
     sort_order: Optional[int] = None
 
+class ParseIngredientsRequest(BaseModel):
+    text: str
+
+class ManualRecipeRequest(BaseModel):
+    title: str
+    url: Optional[str] = None
+    ready_in_minutes: Optional[int] = None
+    servings: Optional[int] = None
+    tags: list[str] = []
+    ingredients: list[dict] = []
+
 
 # ─── Tags ─────────────────────────────────────────────────────────────────────
 
@@ -73,6 +85,60 @@ def tag_suggestions(q: str = Query(""), session: Session = Depends(get_session))
 
 
 # ─── Recipes ──────────────────────────────────────────────────────────────────
+
+@router.post("/recipes/parse")
+async def parse_ingredients(req: ParseIngredientsRequest):
+    """Parse a raw ingredient block into structured ingredients."""
+    parsed = parse_ingredient_block(req.text)
+    # Add aisle lookup for each ingredient
+    for ing in parsed:
+        ing["aisle"] = await lookup_aisle(ing["name"])
+    return {"ingredients": parsed}
+
+
+@router.post("/recipes/manual")
+async def create_manual_recipe(req: ManualRecipeRequest, session: Session = Depends(get_session)):
+    """Create a recipe from manually entered ingredients."""
+    if not req.title.strip():
+        raise HTTPException(400, detail="Recipe title is required")
+
+    # Add aisle to any ingredients missing it
+    ingredients = []
+    for ing in req.ingredients:
+        if not ing.get("aisle"):
+            ing["aisle"] = await lookup_aisle(ing["name"])
+        ingredients.append(ing)
+
+    recipe = Recipe(
+        url=req.url or "",
+        title=req.title.strip(),
+        image_url=None,
+        servings=req.servings or 4,
+        ready_in_minutes=req.ready_in_minutes,
+        summary=None,
+        rating=None,
+        is_vegetarian=False,
+        is_vegan=False,
+        is_gluten_free=False,
+        is_dairy_free=False,
+        ingredients_json=json.dumps(ingredients),
+    )
+    session.add(recipe)
+    session.flush()
+
+    for tag_name in req.tags:
+        tag = session.exec(select(Tag).where(Tag.name == tag_name)).first()
+        if not tag:
+            tag = Tag(name=tag_name)
+            session.add(tag)
+            session.flush()
+        link = RecipeTagLink(recipe_id=recipe.id, tag_id=tag.id)
+        session.add(link)
+
+    session.commit()
+    session.refresh(recipe)
+    return _recipe_response(recipe, session)
+
 
 @router.post("/recipes/import")
 async def import_recipe(req: RecipeImportRequest, session: Session = Depends(get_session)):
