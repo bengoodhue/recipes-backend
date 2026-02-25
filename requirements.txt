@@ -3,3 +3,4 @@ uvicorn[standard]
 sqlmodel
 httpx
 python-dotenv
+recipe-scrapers

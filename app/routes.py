@@ -8,7 +8,7 @@ from datetime import datetime
 
 from .models import (Recipe, Tag, RecipeTagLink, ShoppingList,
                       ShoppingListItem, ShoppingListRecipeLink)
-from .spoonacular import extract_recipe
+from .scraper import extract_recipe
 from .units import aggregate_ingredients
 from .database import get_session
 from .aisles import lookup_aisle
@@ -182,6 +182,7 @@ async def import_recipe(req: RecipeImportRequest, session: Session = Depends(get
         is_vegan=data["is_vegan"],
         is_gluten_free=data["is_gluten_free"],
         is_dairy_free=data["is_dairy_free"],
+        instructions=data.get("instructions"),
         ingredients_json=json.dumps(data["ingredients"]),
     )
     session.add(recipe)
