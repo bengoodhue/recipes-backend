@@ -3,11 +3,6 @@ import json
 import re
 from typing import Optional
 from recipe_scrapers import scrape_html
-try:
-    from recipe_scrapers._exceptions import WebsiteNotImplementedError, NoSchemaFoundInWildMode
-except ImportError:
-    WebsiteNotImplementedError = Exception
-    NoSchemaFoundInWildMode = Exception
 from .aisles import lookup_aisle
 from .parser import parse_ingredient_line
 
@@ -29,7 +24,9 @@ HEADERS = {
 async def extract_recipe(url: str, servings_override: Optional[int] = None) -> dict:
     """
     Fetch a recipe page and extract structured data.
-    Tries recipe-scrapers first, falls back to JSON-LD schema parsing.
+    Strategy:
+    1. Try recipe-scrapers in wild mode (handles schema.org on any site)
+    2. Fall back to manual JSON-LD regex extraction
     """
     async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
         resp = await client.get(url, headers=HEADERS)
@@ -40,84 +37,44 @@ async def extract_recipe(url: str, servings_override: Optional[int] = None) -> d
             )
         html = resp.text
 
-    # Try recipe-scrapers first (supports ~400 sites natively)
-    scraper = None
+    # Try recipe-scrapers wild mode — this reads schema.org JSON-LD from any site
+    raw_ingredients = None
+    title = None
+    image_url = None
+    original_servings = 4
+    ready_in_minutes = None
+    instructions = None
+    auto_tags = []
+
+    wild_mode_error = None
     try:
-        scraper = scrape_html(html, org_url=url)
-        # Test that it actually found something useful
-        _ = scraper.title()
-        _ = scraper.ingredients()
-    except (WebsiteNotImplementedError, NoSchemaFoundInWildMode):
-        scraper = None
-    except Exception:
-        scraper = None
+        scraper = scrape_html(html, org_url=url, wild_mode=True)
+        title = _safe(scraper.title) or None
+        raw_ingredients = _safe(scraper.ingredients) or []
+        image_url = _safe(scraper.image)
+        ready_in_minutes = _safe(scraper.total_time)
+        instructions = _safe(scraper.instructions)
+        yields_str = _safe(scraper.yields) or ""
+        m = re.search(r'\d+', str(yields_str))
+        if m:
+            original_servings = int(m.group())
+        category = _safe(scraper.category) or ""
+        auto_tags = [t.strip().title() for t in str(category).split(",") if t.strip()]
+    except Exception as e:
+        wild_mode_error = f"{type(e).__name__}: {str(e)[:200]}"
+        raw_ingredients = None
 
-    # If recipe-scrapers failed, try wild mode (schema.org JSON-LD)
-    if scraper is None:
-        try:
-            scraper = scrape_html(html, org_url=url, wild_mode=True)
-            _ = scraper.title()
-            _ = scraper.ingredients()
-        except Exception:
-            scraper = None
+    # If we got no ingredients from recipe-scrapers, try manual JSON-LD
+    if not raw_ingredients:
+        return await _extract_from_jsonld(html, url, servings_override, wild_mode_error)
 
-    # If still nothing, try manual JSON-LD extraction
-    if scraper is None:
-        return await _extract_from_jsonld(html, url, servings_override)
-
-    return await _build_result(scraper, url, servings_override)
-
-
-async def _build_result(scraper, url: str, servings_override: Optional[int]) -> dict:
-    """Build normalized result dict from a scraper object."""
-
-    try:
-        title = scraper.title() or "Untitled Recipe"
-    except Exception:
+    if not title:
         title = "Untitled Recipe"
-
-    try:
-        yields_str = scraper.yields() or ""
-        original_servings = int(re.search(r'\d+', yields_str).group()) if re.search(r'\d+', yields_str) else 4
-    except Exception:
-        original_servings = 4
 
     servings = servings_override or original_servings
     scale = servings / original_servings if original_servings else 1
 
-    try:
-        image_url = scraper.image()
-    except Exception:
-        image_url = None
-
-    try:
-        ready_in_minutes = scraper.total_time() or None
-    except Exception:
-        ready_in_minutes = None
-
-    try:
-        raw_ingredients = scraper.ingredients() or []
-    except Exception:
-        raw_ingredients = []
-
-    if not raw_ingredients:
-        raise ValueError(
-            "Could not extract ingredients from this page. "
-            "Try entering the recipe manually."
-        )
-
     ingredients = await _parse_ingredients(raw_ingredients, scale)
-
-    try:
-        instructions = scraper.instructions() or None
-    except Exception:
-        instructions = None
-
-    try:
-        category = scraper.category() or ""
-        auto_tags = [t.strip().title() for t in category.split(",") if t.strip()]
-    except Exception:
-        auto_tags = []
 
     return {
         "title": title,
@@ -135,13 +92,28 @@ async def _build_result(scraper, url: str, servings_override: Optional[int]) -> 
     }
 
 
-async def _extract_from_jsonld(html: str, url: str, servings_override: Optional[int]) -> dict:
+def _safe(fn):
+    """Call a scraper method safely, returning None on any error."""
+    try:
+        return fn()
+    except Exception:
+        return None
+
+
+async def _extract_from_jsonld(html: str, url: str, servings_override: Optional[int], wild_mode_error=None) -> dict:
     """
-    Last resort: find Recipe schema.org JSON-LD blocks in the HTML and parse directly.
+    Manual JSON-LD extraction — finds Recipe schema.org blocks in the raw HTML.
+    Handles @graph arrays, nested lists, and various formats.
     """
-    # Find all <script type="application/ld+json"> blocks
+    # Find ALL script blocks that might contain JSON
     scripts = re.findall(
-        r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>',
+        r'<script[^>]*type=["\']application/ld\+json["\'][^>]*>(.*?)</script>',
+        html, re.DOTALL | re.IGNORECASE
+    )
+
+    # Also try without quotes around type value
+    scripts += re.findall(
+        r'<script[^>]*type=application/ld\+json[^>]*>(.*?)</script>',
         html, re.DOTALL | re.IGNORECASE
     )
 
@@ -149,19 +121,7 @@ async def _extract_from_jsonld(html: str, url: str, servings_override: Optional[
     for script in scripts:
         try:
             data = json.loads(script.strip())
-            # Handle @graph arrays
-            if isinstance(data, dict) and data.get("@graph"):
-                for item in data["@graph"]:
-                    if isinstance(item, dict) and "Recipe" in str(item.get("@type", "")):
-                        recipe_data = item
-                        break
-            elif isinstance(data, list):
-                for item in data:
-                    if isinstance(item, dict) and "Recipe" in str(item.get("@type", "")):
-                        recipe_data = item
-                        break
-            elif isinstance(data, dict) and "Recipe" in str(data.get("@type", "")):
-                recipe_data = data
+            recipe_data = _find_recipe_in_jsonld(data)
             if recipe_data:
                 break
         except Exception:
@@ -169,12 +129,16 @@ async def _extract_from_jsonld(html: str, url: str, servings_override: Optional[
 
     if not recipe_data:
         raise ValueError(
-            f"Could not extract recipe data from this page (found {len(scripts)} JSON-LD blocks). "
+            f"Could not extract recipe data from this page "
+            f"(wild_mode: {wild_mode_error}, searched {len(scripts)} JSON-LD blocks). "
             "Try entering the recipe manually."
         )
+
     title = recipe_data.get("name") or "Untitled Recipe"
+
+    # Image
     image = recipe_data.get("image")
-    if isinstance(image, list):
+    if isinstance(image, list) and image:
         image = image[0]
     if isinstance(image, dict):
         image = image.get("url")
@@ -182,7 +146,10 @@ async def _extract_from_jsonld(html: str, url: str, servings_override: Optional[
     # Servings
     try:
         yields_str = str(recipe_data.get("recipeYield") or "4")
-        original_servings = int(re.search(r'\d+', yields_str).group())
+        if isinstance(recipe_data.get("recipeYield"), list):
+            yields_str = str(recipe_data["recipeYield"][0])
+        m = re.search(r'\d+', yields_str)
+        original_servings = int(m.group()) if m else 4
     except Exception:
         original_servings = 4
 
@@ -190,53 +157,53 @@ async def _extract_from_jsonld(html: str, url: str, servings_override: Optional[
     scale = servings / original_servings if original_servings else 1
 
     # Cook time
-    try:
-        total_time_str = recipe_data.get("totalTime") or recipe_data.get("cookTime") or ""
-        minutes = _parse_iso_duration(total_time_str)
-    except Exception:
-        minutes = None
+    minutes = None
+    for key in ("totalTime", "cookTime", "performTime"):
+        val = recipe_data.get(key)
+        if val:
+            minutes = _parse_iso_duration(str(val))
+            if minutes:
+                break
 
     # Ingredients
     raw_ingredients = recipe_data.get("recipeIngredient") or []
     if not raw_ingredients:
         raise ValueError(
-            "Could not extract ingredients from this page. "
+            "Found recipe data but could not extract ingredients. "
             "Try entering the recipe manually."
         )
 
     ingredients = await _parse_ingredients(raw_ingredients, scale)
 
     # Instructions
-    try:
-        instr = recipe_data.get("recipeInstructions")
-        if isinstance(instr, str):
-            instructions = instr
-        elif isinstance(instr, list):
-            steps = []
-            for step in instr:
-                if isinstance(step, str):
-                    steps.append(step)
-                elif isinstance(step, dict):
-                    steps.append(step.get("text", ""))
-            instructions = "\n\n".join(s for s in steps if s)
-        else:
-            instructions = None
-    except Exception:
-        instructions = None
+    instr = recipe_data.get("recipeInstructions")
+    instructions = None
+    if isinstance(instr, str):
+        instructions = instr.strip()
+    elif isinstance(instr, list):
+        steps = []
+        for step in instr:
+            if isinstance(step, str):
+                steps.append(step.strip())
+            elif isinstance(step, dict):
+                text = step.get("text") or step.get("name") or ""
+                if text:
+                    steps.append(text.strip())
+        instructions = "\n\n".join(s for s in steps if s) or None
 
     # Tags
-    try:
-        keywords = recipe_data.get("keywords") or recipe_data.get("recipeCategory") or ""
-        if isinstance(keywords, list):
-            auto_tags = [k.strip().title() for k in keywords if k.strip()]
-        else:
-            auto_tags = [k.strip().title() for k in str(keywords).split(",") if k.strip()]
-    except Exception:
-        auto_tags = []
+    auto_tags = []
+    for key in ("keywords", "recipeCategory", "recipeCuisine"):
+        val = recipe_data.get(key)
+        if val:
+            if isinstance(val, list):
+                auto_tags += [v.strip().title() for v in val if v.strip()]
+            else:
+                auto_tags += [v.strip().title() for v in str(val).split(",") if v.strip()]
 
     return {
         "title": title,
-        "image_url": image,
+        "image_url": image if isinstance(image, str) else None,
         "servings": servings,
         "ready_in_minutes": minutes,
         "summary": None,
@@ -245,24 +212,48 @@ async def _extract_from_jsonld(html: str, url: str, servings_override: Optional[
         "is_gluten_free": False,
         "is_dairy_free": False,
         "ingredients": ingredients,
-        "auto_tags": auto_tags,
+        "auto_tags": list(set(auto_tags)),
         "instructions": instructions,
     }
+
+
+def _find_recipe_in_jsonld(data) -> Optional[dict]:
+    """Recursively search JSON-LD data for a Recipe object."""
+    if isinstance(data, dict):
+        type_val = data.get("@type", "")
+        if isinstance(type_val, list):
+            if any("Recipe" in str(t) for t in type_val):
+                return data
+        elif "Recipe" in str(type_val):
+            return data
+        # Check @graph
+        if "@graph" in data:
+            result = _find_recipe_in_jsonld(data["@graph"])
+            if result:
+                return result
+    elif isinstance(data, list):
+        for item in data:
+            result = _find_recipe_in_jsonld(item)
+            if result:
+                return result
+    return None
 
 
 async def _parse_ingredients(raw_ingredients: list, scale: float) -> list:
     """Parse and scale a list of raw ingredient strings."""
     ingredients = []
     for line in raw_ingredients:
-        parsed = parse_ingredient_line(str(line))
+        line = str(line).strip()
+        parsed = parse_ingredient_line(line)
         if not parsed:
+            aisle = await lookup_aisle(line)
             ingredients.append({
-                "name": str(line).strip(),
-                "original": str(line).strip(),
+                "name": line,
+                "original": line,
                 "amount": None,
                 "unit": "",
                 "display_quantity": "",
-                "aisle": "Other",
+                "aisle": aisle,
             })
             continue
 
@@ -273,7 +264,7 @@ async def _parse_ingredients(raw_ingredients: list, scale: float) -> list:
         aisle = await lookup_aisle(parsed["name"])
         ingredients.append({
             "name": parsed["name"],
-            "original": str(line).strip(),
+            "original": line,
             "amount": amount,
             "unit": parsed.get("unit", ""),
             "display_quantity": parsed.get("display_quantity", ""),
