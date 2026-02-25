@@ -3,8 +3,11 @@ import json
 import re
 from typing import Optional
 from recipe_scrapers import scrape_html
-from recipe_scrapers._exceptions import WebsiteNotImplementedError, NoSchemaFoundInWildMode
-from .aisles import lookup_aisle
+try:
+    from recipe_scrapers._exceptions import WebsiteNotImplementedError, NoSchemaFoundInWildMode
+except ImportError:
+    WebsiteNotImplementedError = Exception
+    NoSchemaFoundInWildMode = Exceptionfrom .aisles import lookup_aisle
 from .parser import parse_ingredient_line
 
 
@@ -165,11 +168,9 @@ async def _extract_from_jsonld(html: str, url: str, servings_override: Optional[
 
     if not recipe_data:
         raise ValueError(
-            "Could not extract recipe data from this page. "
-            "The site may not support recipe imports. "
+            f"Could not extract recipe data from this page (found {len(scripts)} JSON-LD blocks). "
             "Try entering the recipe manually."
         )
-
     title = recipe_data.get("name") or "Untitled Recipe"
     image = recipe_data.get("image")
     if isinstance(image, list):
