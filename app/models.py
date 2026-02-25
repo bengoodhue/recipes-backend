@@ -28,6 +28,8 @@ class Recipe(SQLModel, table=True):
     is_vegan: bool = False
     is_gluten_free: bool = False
     is_dairy_free: bool = False
+    source: Optional[str] = None       # e.g. "Serious Eats", "Joy of Cooking p.142"
+    instructions: Optional[str] = None # free-form instructions text
     # Store ingredients as JSON string
     ingredients_json: str = Field(default="[]")
     created_at: datetime = Field(default_factory=datetime.utcnow)
@@ -55,7 +57,7 @@ class ShoppingListRecipeLink(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     shopping_list_id: int = Field(foreign_key="shoppinglist.id")
     recipe_id: int = Field(foreign_key="recipe.id")
-    servings_override: Optional[int] = None  # scale recipe to different serving size
+    servings_override: Optional[int] = None
     shopping_list: Optional[ShoppingList] = Relationship(back_populates="recipe_links")
 
 
@@ -63,19 +65,16 @@ class ShoppingListItem(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     shopping_list_id: int = Field(foreign_key="shoppinglist.id")
     name: str
-    # Aggregated/display quantity info
-    display_quantity: Optional[str] = None  # e.g. "3.5 cups" or "28 oz"
+    display_quantity: Optional[str] = None
     unit: Optional[str] = None
     amount: Optional[float] = None
     aisle: Optional[str] = None
     is_pantry_staple: bool = False
     is_checked: bool = False
-    is_manual: bool = False  # user-added vs recipe-derived
-    # Track which recipes contributed (JSON list of recipe_ids)
+    is_manual: bool = False
     source_recipe_ids_json: str = Field(default="[]")
-    # Flag for incompatible unit merge
     has_unit_conflict: bool = False
-    conflict_details_json: str = Field(default="[]")  # raw conflicting entries
+    conflict_details_json: str = Field(default="[]")
     sort_order: int = 0
     shopping_list: Optional[ShoppingList] = Relationship(back_populates="items")
 

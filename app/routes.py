@@ -39,6 +39,12 @@ class RecipeUpdateRequest(BaseModel):
     tags: Optional[list[str]] = None
     rating: Optional[int] = None
     servings: Optional[int] = None
+    title: Optional[str] = None
+    ready_in_minutes: Optional[int] = None
+    source: Optional[str] = None
+    instructions: Optional[str] = None
+    ingredients: Optional[list[dict]] = None
+    url: Optional[str] = None
 
 class ListCreateRequest(BaseModel):
     name: str
@@ -69,10 +75,12 @@ class ParseIngredientsRequest(BaseModel):
 class ManualRecipeRequest(BaseModel):
     title: str
     url: Optional[str] = None
+    source: Optional[str] = None
     ready_in_minutes: Optional[int] = None
     servings: Optional[int] = None
     tags: list[str] = []
     ingredients: list[dict] = []
+    instructions: Optional[str] = None
 
 
 # ─── Tags ─────────────────────────────────────────────────────────────────────
@@ -121,6 +129,8 @@ async def create_manual_recipe(req: ManualRecipeRequest, session: Session = Depe
         is_vegan=False,
         is_gluten_free=False,
         is_dairy_free=False,
+        source=req.source,
+        instructions=req.instructions,
         ingredients_json=json.dumps(ingredients),
     )
     session.add(recipe)
@@ -151,10 +161,7 @@ async def import_recipe(req: RecipeImportRequest, session: Session = Depends(get
         if _normalize_url(r.url) == normalized:
             raise HTTPException(400, detail=f"Recipe already exists: {r.title}")
 
-    try:
-        data = await extract_recipe(req.url, req.servings_override)
-    except ValueError as e:
-        raise HTTPException(400, detail=str(e))
+    data = await extract_recipe(req.url, req.servings_override)
 
     # Title duplicate check as fallback
     title_match = session.exec(
@@ -224,10 +231,22 @@ def update_recipe(recipe_id: int, req: RecipeUpdateRequest, session: Session = D
     recipe = session.get(Recipe, recipe_id)
     if not recipe:
         raise HTTPException(404, "Recipe not found")
+    if req.title is not None:
+        recipe.title = req.title
     if req.rating is not None:
         recipe.rating = req.rating
     if req.servings is not None:
         recipe.servings = req.servings
+    if req.ready_in_minutes is not None:
+        recipe.ready_in_minutes = req.ready_in_minutes
+    if req.source is not None:
+        recipe.source = req.source
+    if req.instructions is not None:
+        recipe.instructions = req.instructions
+    if req.url is not None:
+        recipe.url = req.url
+    if req.ingredients is not None:
+        recipe.ingredients_json = __import__('json').dumps(req.ingredients)
     if req.tags is not None:
         existing = session.exec(select(RecipeTagLink).where(RecipeTagLink.recipe_id == recipe_id)).all()
         for link in existing:
@@ -275,7 +294,7 @@ def create_list(req: ListCreateRequest, session: Session = Depends(get_session))
 
 @router.get("/lists")
 def get_lists(session: Session = Depends(get_session)):
-    lists = session.exec(select(ShoppingList).order_by(ShoppingList.updated_at.desc())).all()
+    lists = session.exec(select(ShoppingList)).all()
     return [_list_summary(l) for l in lists]
 
 
@@ -430,7 +449,7 @@ def _rebuild_list_items(list_id: int, session: Session):
         ings = recipe.ingredients
         if link.servings_override and recipe.servings:
             scale = link.servings_override / recipe.servings
-            ings = [{**i, "amount": (i["amount"] * scale if i.get("amount") is not None else None)} for i in ings]
+            ings = [{**i, "amount": i["amount"] * scale} for i in ings]
         ingredient_lists.append(ings)
         recipe_ids.append(link.recipe_id)
 
@@ -471,6 +490,8 @@ def _recipe_response(recipe: Recipe, session: Session) -> dict:
         "is_dairy_free": recipe.is_dairy_free,
         "tags": [t.name for t in tags],
         "ingredients": recipe.ingredients,
+        "source": recipe.source,
+        "instructions": recipe.instructions,
         "created_at": recipe.created_at,
     }
 
