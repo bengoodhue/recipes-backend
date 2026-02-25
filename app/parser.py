@@ -83,9 +83,12 @@ def is_likely_instruction(line: str) -> bool:
     if line.isupper() and len(line) > 3:
         return True
 
-    # Very long lines are almost certainly instructions
-    if len(line) > 120:
-        return True
+    # Very long lines are likely instructions, UNLESS they start with a number/fraction
+        # (long ingredient lines with notes like "or one can..." are still ingredients)
+        if len(line) > 120:
+            starts_with_amount = re.match(r'^[\u00bc\u00bd\u00be\u2150-\u215e\d]', line)
+            if not starts_with_amount:
+                return True
 
     # Lines with mid-sentence periods are instructions
     if re.search(r'[a-z]\.[A-Z]', line) or re.search(r'\.\s+[A-Z]', line):
