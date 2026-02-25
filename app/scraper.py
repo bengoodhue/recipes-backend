@@ -31,7 +31,7 @@ async def extract_recipe(url: str, servings_override: Optional[int] = None) -> d
     try:
         scraper = scrape_html(html, org_url=url)
     except Exception as e:
-        raise ValueError(f"Could not parse recipe from this page. Try entering the recipe manually.")
+        raise ValueError(f"Could not parse recipe from this page ({type(e).__name__}: {str(e)}). Try entering the recipe manually.")
 
     # Get title
     try:
