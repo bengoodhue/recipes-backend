@@ -51,7 +51,7 @@ INSTRUCTION_VERBS = [
 BULLET_PATTERN = re.compile(
     r'^[\s]*'           # leading whitespace
     r'(?:'
-    r'[\u2022\u2023\u25e6\u2043\u2219\u25aa\u25cf\u25cb\u2726\u2713\u2714]'  # unicode bullets
+    r'[\u2022\u2023\u25e6\u2043\u2219\u25aa\u25cf\u25cb\u2726\u2713\u2714\u25a2\u25a1\u2610\u2611\u2612]'  # unicode bullets + checkboxes
     r'|[-\*\+\#]'       # ASCII bullets
     r'|\d+[\.\)]\s*'    # numbered lists like "1." or "1)"
     r'|[a-zA-Z][\.\)]\s*'  # lettered lists like "a." or "a)"
