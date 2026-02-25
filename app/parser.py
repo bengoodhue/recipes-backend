@@ -33,8 +33,75 @@ UNITS = [
 
 # Sort by length descending so longer units match first (e.g. "fluid ounce" before "ounce")
 UNITS_SORTED = sorted(UNITS, key=len, reverse=True)
-
 UNIT_PATTERN = "|".join(re.escape(u) for u in UNITS_SORTED)
+
+# Words that strongly suggest a line is an instruction, not an ingredient
+INSTRUCTION_VERBS = [
+    'heat', 'cook', 'bake', 'boil', 'simmer', 'stir', 'mix', 'combine',
+    'add', 'place', 'put', 'pour', 'transfer', 'remove', 'serve', 'let',
+    'allow', 'preheat', 'prepare', 'bring', 'reduce', 'whisk', 'fold',
+    'season', 'taste', 'check', 'ensure', 'make', 'use', 'set', 'turn',
+    'cover', 'drain', 'rinse', 'wash', 'dry', 'cut', 'chop', 'dice',
+    'mince', 'slice', 'grate', 'peel', 'trim', 'blend', 'pulse', 'process',
+    'spread', 'top', 'garnish', 'finish', 'enjoy', 'refrigerate', 'freeze',
+    'store', 'keep', 'note', 'tip', 'optional',
+]
+
+# Bullet/list marker pattern to strip from start of lines
+BULLET_PATTERN = re.compile(
+    r'^[\s]*'           # leading whitespace
+    r'(?:'
+    r'[\u2022\u2023\u25e6\u2043\u2219\u25aa\u25cf\u25cb\u2726\u2713\u2714]'  # unicode bullets
+    r'|[-\*\+\#]'       # ASCII bullets
+    r'|\d+[\.\)]\s*'    # numbered lists like "1." or "1)"
+    r'|[a-zA-Z][\.\)]\s*'  # lettered lists like "a." or "a)"
+    r')'
+    r'[\s]*',           # trailing whitespace after bullet
+    re.UNICODE
+)
+
+
+def strip_bullets(line: str) -> str:
+    """Remove leading bullet points, numbers, dashes from a line."""
+    return BULLET_PATTERN.sub('', line).strip()
+
+
+def is_likely_instruction(line: str) -> bool:
+    """
+    Return True if this line looks like a cooking instruction rather than an ingredient.
+    """
+    line = line.strip()
+
+    if not line:
+        return False
+
+    # Section headers ending with colon
+    if line.endswith(':') and len(line.split()) <= 5:
+        return True
+
+    # All caps short lines are headers (e.g. "FOR THE SAUCE")
+    if line.isupper() and len(line) > 3:
+        return True
+
+    # Very long lines are almost certainly instructions
+    if len(line) > 120:
+        return True
+
+    # Lines with mid-sentence periods are instructions
+    if re.search(r'[a-z]\.[A-Z]', line) or re.search(r'\.\s+[A-Z]', line):
+        return True
+
+    # Check if the line starts with an instruction verb (after stripping bullets)
+    cleaned = strip_bullets(line).lower()
+    first_word = cleaned.split()[0] if cleaned.split() else ''
+    if first_word in INSTRUCTION_VERBS:
+        return True
+
+    # Lines that start with "Step", "Method", "Direction", "Note", "Tip"
+    if re.match(r'^(step|method|direction|instruction|note|tip)\b', cleaned, re.IGNORECASE):
+        return True
+
+    return False
 
 
 def parse_amount(text: str) -> tuple[float, str]:
@@ -42,7 +109,6 @@ def parse_amount(text: str) -> tuple[float, str]:
     Parse amount string like '1/2', '1 1/2', '2', '¼' into a float.
     Returns (amount, remaining_text).
     """
-    # Replace unicode fractions
     unicode_fractions = {
         '¼': '1/4', '½': '1/2', '¾': '3/4',
         '⅓': '1/3', '⅔': '2/3', '⅛': '1/8', '⅜': '3/8',
@@ -53,7 +119,6 @@ def parse_amount(text: str) -> tuple[float, str]:
 
     text = text.strip()
 
-    # Match patterns like: "1 1/2", "1/2", "2", "1.5"
     pattern = r'^(\d+\s+\d+/\d+|\d+/\d+|\d+\.?\d*)'
     match = re.match(pattern, text)
     if not match:
@@ -64,7 +129,6 @@ def parse_amount(text: str) -> tuple[float, str]:
 
     try:
         if ' ' in amount_str:
-            # Mixed number like "1 1/2"
             parts = amount_str.split()
             amount = float(parts[0]) + float(Fraction(parts[1]))
         elif '/' in amount_str:
@@ -88,7 +152,6 @@ def parse_unit(text: str) -> tuple[str, str]:
     if match:
         unit = match.group(1).lower()
         remaining = text[match.end():].strip()
-        # Normalize unit
         unit = normalize_unit(unit)
         return unit, remaining
     return "", text
@@ -127,24 +190,16 @@ def normalize_unit(unit: str) -> str:
 
 
 def clean_ingredient_name(text: str) -> str:
-    """
-    Remove descriptive text after commas and clean up the ingredient name.
-    e.g. "garlic, finely grated" -> "garlic"
-    e.g. "eggs, lightly beaten" -> "eggs"
-    But keep things like "salt and pepper" intact.
-    """
-    # Remove leading numbers/bullets
-    text = re.sub(r'^[\d\.\-\*\•]+\s*', '', text).strip()
+    """Clean up ingredient name — remove descriptors, parentheticals, etc."""
+    # Remove parenthetical notes
+    text = re.sub(r'\(.*?\)', '', text).strip()
 
-    # Split on comma and take first part (removes "finely chopped" etc)
+    # Split on comma and take first part
     if ',' in text:
         parts = text.split(',')
         text = parts[0].strip()
 
-    # Remove parenthetical notes
-    text = re.sub(r'\(.*?\)', '', text).strip()
-
-    # Remove trailing descriptors like "lightly beaten", "at room temperature"
+    # Remove trailing descriptors
     stop_words = [
         'lightly', 'finely', 'coarsely', 'roughly', 'thinly', 'thickly',
         'freshly', 'well', 'loosely', 'packed', 'heaping', 'leveled',
@@ -156,23 +211,24 @@ def clean_ingredient_name(text: str) -> str:
     for word in stop_words:
         text = re.sub(rf'\b{word}\b', '', text, flags=re.IGNORECASE).strip()
 
-    # Clean up extra spaces
     text = re.sub(r'\s+', ' ', text).strip()
-
     return text
 
 
 def parse_ingredient_line(line: str) -> dict | None:
     """
     Parse a single ingredient line into amount, unit, name.
-    Returns None if the line is empty or a section header.
+    Returns None if the line should be skipped.
+    Includes 'low_confidence' flag for uncertain lines.
     """
-    line = line.strip()
+    # Strip bullets and leading markers first
+    line = strip_bullets(line).strip()
+
     if not line:
         return None
 
-    # Skip lines that look like section headers (no numbers, all caps or ends with :)
-    if line.endswith(':') or (line.isupper() and len(line) > 3):
+    # Skip instruction lines
+    if is_likely_instruction(line):
         return None
 
     # Try to parse amount
@@ -187,6 +243,9 @@ def parse_ingredient_line(line: str) -> dict | None:
     if not name:
         return None
 
+    # Flag low confidence: no amount AND no recognized unit
+    low_confidence = (amount == 0.0 and not unit)
+
     # Build display quantity
     if amount > 0:
         display = format_amount(amount)
@@ -200,6 +259,7 @@ def parse_ingredient_line(line: str) -> dict | None:
         "amount": amount if amount > 0 else None,
         "unit": unit or "",
         "display_quantity": display,
+        "low_confidence": low_confidence,
     }
 
 
@@ -212,7 +272,6 @@ def format_amount(amount: float) -> str:
 
     whole = int(amount)
     remainder = round(amount - whole, 3)
-
     frac_str = fraction_map.get(round(remainder, 2), "")
 
     if whole == 0 and frac_str:
@@ -228,7 +287,7 @@ def format_amount(amount: float) -> str:
 def parse_ingredient_block(text: str) -> list[dict]:
     """
     Parse a multi-line ingredient block.
-    Returns list of parsed ingredient dicts.
+    Returns list of parsed ingredient dicts, each with a 'low_confidence' flag.
     """
     lines = text.strip().split('\n')
     results = []
