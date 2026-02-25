@@ -275,7 +275,7 @@ def create_list(req: ListCreateRequest, session: Session = Depends(get_session))
 
 @router.get("/lists")
 def get_lists(session: Session = Depends(get_session)):
-    lists = session.exec(select(ShoppingList)).all()
+    lists = session.exec(select(ShoppingList).order_by(ShoppingList.updated_at.desc())).all()
     return [_list_summary(l) for l in lists]
 
 
