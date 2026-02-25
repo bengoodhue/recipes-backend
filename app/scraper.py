@@ -36,6 +36,7 @@ async def extract_recipe(url: str, servings_override: Optional[int] = None) -> d
                 "The site may be blocking imports."
             )
         html = resp.text
+        html_preview = html[:300].replace('\n', ' ')
 
     # Try recipe-scrapers wild mode — this reads schema.org JSON-LD from any site
     raw_ingredients = None
