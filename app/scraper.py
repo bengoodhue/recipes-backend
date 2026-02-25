@@ -7,7 +7,8 @@ try:
     from recipe_scrapers._exceptions import WebsiteNotImplementedError, NoSchemaFoundInWildMode
 except ImportError:
     WebsiteNotImplementedError = Exception
-    NoSchemaFoundInWildMode = Exceptionfrom .aisles import lookup_aisle
+    NoSchemaFoundInWildMode = Exception
+from .aisles import lookup_aisle
 from .parser import parse_ingredient_line
 
 
