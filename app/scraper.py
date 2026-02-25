@@ -36,6 +36,9 @@ async def extract_recipe(url: str, servings_override: Optional[int] = None) -> d
                 "The site may be blocking imports."
             )
         html = resp.text
+        html_preview = html[:300].replace('\n', ' ')
+
+    # Try recipe-scrapers wild mode
 
     # Try recipe-scrapers wild mode — this reads schema.org JSON-LD from any site
     raw_ingredients = None
@@ -127,10 +130,10 @@ async def _extract_from_jsonld(html: str, url: str, servings_override: Optional[
         except Exception:
             continue
 
-    if not recipe_data:
-        raise ValueError(
+    raise ValueError(
             f"Could not extract recipe data from this page "
-            f"(wild_mode: {wild_mode_error}, searched {len(scripts)} JSON-LD blocks). "
+            f"(wild_mode: {wild_mode_error}, searched {len(scripts)} JSON-LD blocks, "
+            f"html_preview: {html_preview}). "
             "Try entering the recipe manually."
         )
 
