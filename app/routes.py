@@ -4,10 +4,11 @@ from typing import Optional
 from pydantic import BaseModel
 from urllib.parse import urlparse
 import json
+import re
 from datetime import datetime
 
 from .models import (Recipe, Tag, RecipeTagLink, ShoppingList,
-                      ShoppingListItem, ShoppingListRecipeLink)
+                      ShoppingListItem, ShoppingListRecipeLink, PantryItem)
 from .scraper import extract_recipe
 from .units import aggregate_ingredients
 from .database import get_session
@@ -285,6 +286,39 @@ def delete_recipe(recipe_id: int, session: Session = Depends(get_session)):
     return {"ok": True}
 
 
+# ─── Pantry ───────────────────────────────────────────────────────────────────
+
+class PantryItemRequest(BaseModel):
+    name: str
+
+@router.get("/pantry")
+def get_pantry(session: Session = Depends(get_session)):
+    return session.exec(select(PantryItem).order_by(PantryItem.name)).all()
+
+@router.post("/pantry")
+def add_pantry_item(req: PantryItemRequest, session: Session = Depends(get_session)):
+    name = req.name.strip().lower()
+    if not name:
+        raise HTTPException(400, "Name is required")
+    existing = session.exec(select(PantryItem).where(PantryItem.name == name)).first()
+    if existing:
+        raise HTTPException(400, "Already in pantry")
+    item = PantryItem(name=name)
+    session.add(item)
+    session.commit()
+    session.refresh(item)
+    return item
+
+@router.delete("/pantry/{item_id}")
+def delete_pantry_item(item_id: int, session: Session = Depends(get_session)):
+    item = session.get(PantryItem, item_id)
+    if not item:
+        raise HTTPException(404)
+    session.delete(item)
+    session.commit()
+    return {"ok": True}
+
+
 # ─── Shopping Lists ───────────────────────────────────────────────────────────
 
 @router.post("/lists")
@@ -298,8 +332,8 @@ def create_list(req: ListCreateRequest, session: Session = Depends(get_session))
 
 @router.get("/lists")
 def get_lists(session: Session = Depends(get_session)):
-    lists = session.exec(select(ShoppingList)).all()
-    return [_list_summary(l) for l in lists]
+    lists = session.exec(select(ShoppingList).order_by(ShoppingList.updated_at.desc())).all()
+    return [_list_summary(l, session) for l in lists]
 
 
 @router.get("/lists/{list_id}")
@@ -317,7 +351,7 @@ def rename_list(list_id: int, req: ListRenameRequest, session: Session = Depends
         raise HTTPException(404)
     lst.name = req.name
     session.commit()
-    return _list_summary(lst)
+    return _list_summary(lst, session)
 
 
 @router.delete("/lists/{list_id}")
@@ -453,13 +487,25 @@ def _rebuild_list_items(list_id: int, session: Session):
         ings = recipe.ingredients
         if link.servings_override and recipe.servings:
             scale = link.servings_override / recipe.servings
-            ings = [{**i, "amount": i["amount"] * scale} for i in ings]
+            ings = [{**i, "amount": (i["amount"] * scale if i["amount"] is not None else None)} for i in ings]
         ingredient_lists.append(ings)
         recipe_ids.append(link.recipe_id)
 
     aggregated = aggregate_ingredients(ingredient_lists, recipe_ids)
 
+    # Build word-sets for each pantry entry for fuzzy matching.
+    # "salt" matches "kosher salt"; "black pepper" matches "ground black pepper".
+    pantry_word_sets = [
+        frozenset(re.findall(r'[a-z]+', p.name.lower()))
+        for p in session.exec(select(PantryItem)).all()
+    ]
+
+    def _is_pantry_match(ingredient_name: str) -> bool:
+        words = frozenset(re.findall(r'[a-z]+', ingredient_name.lower()))
+        return any(pw and pw.issubset(words) for pw in pantry_word_sets)
+
     for i, agg in enumerate(aggregated):
+        is_pantry = _is_pantry_match(agg["name"])
         item = ShoppingListItem(
             shopping_list_id=list_id,
             name=agg["name"],
@@ -471,6 +517,7 @@ def _rebuild_list_items(list_id: int, session: Session):
             source_recipe_ids_json=str(agg["source_recipe_ids_json"]),
             conflict_details_json=str(agg["conflict_details_json"]),
             sort_order=i,
+            is_pantry_staple=is_pantry,
         )
         session.add(item)
 
@@ -532,12 +579,31 @@ def _list_response(lst: ShoppingList, session: Session) -> dict:
     }
 
 
-def _list_summary(lst: ShoppingList) -> dict:
+def _list_summary(lst: ShoppingList, session=None) -> dict:
+    recipe_previews = []
+    item_count = 0
+    if session:
+        links = session.exec(
+            select(ShoppingListRecipeLink).where(ShoppingListRecipeLink.shopping_list_id == lst.id)
+        ).all()
+        for link in links:
+            recipe = session.get(Recipe, link.recipe_id)
+            if recipe:
+                recipe_previews.append({
+                    "id": recipe.id,
+                    "title": recipe.title,
+                    "image_url": recipe.image_url,
+                })
+        item_count = len(session.exec(
+            select(ShoppingListItem).where(ShoppingListItem.shopping_list_id == lst.id)
+        ).all())
     return {
         "id": lst.id,
         "name": lst.name,
         "created_at": lst.created_at,
         "updated_at": lst.updated_at,
+        "recipes": recipe_previews,
+        "item_count": item_count,
     }
 
 

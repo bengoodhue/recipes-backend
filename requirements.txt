@@ -4,3 +4,4 @@ sqlmodel
 httpx
 python-dotenv
 recipe-scrapers
+playwright

@@ -1,44 +1,53 @@
-import httpx
 import json
 import re
 from typing import Optional
+from playwright.async_api import async_playwright
 from recipe_scrapers import scrape_html
 from .aisles import lookup_aisle
 from .parser import parse_ingredient_line
 
 
-HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/120.0.0.0 Safari/537.36"
-    ),
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.5",
-    "Accept-Encoding": "gzip, deflate, br",
-    "Connection": "keep-alive",
-    "Upgrade-Insecure-Requests": "1",
-}
+async def _fetch_html(url: str) -> str:
+    """Fetch page HTML using a headless Chromium browser."""
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]
+        )
+        context = await browser.new_context(
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Safari/537.36"
+            ),
+            viewport={"width": 1280, "height": 800},
+        )
+        page = await context.new_page()
+        try:
+            response = await page.goto(url, wait_until="domcontentloaded", timeout=20000)
+            if response and response.status != 200:
+                raise ValueError(
+                    f"Could not load page (HTTP {response.status}). "
+                    "The site may be blocking imports."
+                )
+            # Wait a moment for JS to render recipe schema
+            await page.wait_for_timeout(1500)
+            html = await page.content()
+        finally:
+            await browser.close()
+    return html
 
 
 async def extract_recipe(url: str, servings_override: Optional[int] = None) -> dict:
     """
-    Fetch a recipe page and extract structured data.
+    Fetch a recipe page using Playwright and extract structured data.
     Strategy:
-    1. Try recipe-scrapers in wild mode (handles schema.org on any site)
-    2. Fall back to manual JSON-LD regex extraction
+    1. Use headless Chromium to load the page (bypasses bot detection, runs JS)
+    2. Try recipe-scrapers wild mode on the rendered HTML
+    3. Fall back to manual JSON-LD extraction
     """
-    async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
-        resp = await client.get(url, headers=HEADERS)
-        if resp.status_code != 200:
-            raise ValueError(
-                f"Could not load page (HTTP {resp.status_code}). "
-                "The site may be blocking imports."
-            )
-        html = resp.text
-        html_preview = html[:300].replace('\n', ' ')
+    html = await _fetch_html(url)
 
-    # Try recipe-scrapers wild mode — this reads schema.org JSON-LD from any site
     raw_ingredients = None
     title = None
     image_url = None
@@ -46,8 +55,8 @@ async def extract_recipe(url: str, servings_override: Optional[int] = None) -> d
     ready_in_minutes = None
     instructions = None
     auto_tags = []
-
     wild_mode_error = None
+
     try:
         scraper = scrape_html(html, org_url=url, wild_mode=True)
         title = _safe(scraper.title) or None
@@ -65,16 +74,14 @@ async def extract_recipe(url: str, servings_override: Optional[int] = None) -> d
         wild_mode_error = f"{type(e).__name__}: {str(e)[:200]}"
         raw_ingredients = None
 
-    # If we got no ingredients from recipe-scrapers, try manual JSON-LD
     if not raw_ingredients:
-        return await _extract_from_jsonld(html, url, servings_override, wild_mode_error, html_preview)
+        return await _extract_from_jsonld(html, url, servings_override, wild_mode_error)
 
     if not title:
         title = "Untitled Recipe"
 
     servings = servings_override or original_servings
     scale = servings / original_servings if original_servings else 1
-
     ingredients = await _parse_ingredients(raw_ingredients, scale)
 
     return {
@@ -94,25 +101,18 @@ async def extract_recipe(url: str, servings_override: Optional[int] = None) -> d
 
 
 def _safe(fn):
-    """Call a scraper method safely, returning None on any error."""
     try:
         return fn()
     except Exception:
         return None
 
 
-async def _extract_from_jsonld(html: str, url: str, servings_override: Optional[int], wild_mode_error=None, html_preview='') -> dict:
-    """
-    Manual JSON-LD extraction — finds Recipe schema.org blocks in the raw HTML.
-    Handles @graph arrays, nested lists, and various formats.
-    """
-    # Find ALL script blocks that might contain JSON
+async def _extract_from_jsonld(html: str, url: str, servings_override: Optional[int], wild_mode_error=None) -> dict:
+    """Manual JSON-LD extraction fallback."""
     scripts = re.findall(
         r'<script[^>]*type=["\']application/ld\+json["\'][^>]*>(.*?)</script>',
         html, re.DOTALL | re.IGNORECASE
     )
-
-    # Also try without quotes around type value
     scripts += re.findall(
         r'<script[^>]*type=application/ld\+json[^>]*>(.*?)</script>',
         html, re.DOTALL | re.IGNORECASE
@@ -137,14 +137,12 @@ async def _extract_from_jsonld(html: str, url: str, servings_override: Optional[
 
     title = recipe_data.get("name") or "Untitled Recipe"
 
-    # Image
     image = recipe_data.get("image")
     if isinstance(image, list) and image:
         image = image[0]
     if isinstance(image, dict):
         image = image.get("url")
 
-    # Servings
     try:
         yields_str = str(recipe_data.get("recipeYield") or "4")
         if isinstance(recipe_data.get("recipeYield"), list):
@@ -157,7 +155,6 @@ async def _extract_from_jsonld(html: str, url: str, servings_override: Optional[
     servings = servings_override or original_servings
     scale = servings / original_servings if original_servings else 1
 
-    # Cook time
     minutes = None
     for key in ("totalTime", "cookTime", "performTime"):
         val = recipe_data.get(key)
@@ -166,7 +163,6 @@ async def _extract_from_jsonld(html: str, url: str, servings_override: Optional[
             if minutes:
                 break
 
-    # Ingredients
     raw_ingredients = recipe_data.get("recipeIngredient") or []
     if not raw_ingredients:
         raise ValueError(
@@ -176,7 +172,6 @@ async def _extract_from_jsonld(html: str, url: str, servings_override: Optional[
 
     ingredients = await _parse_ingredients(raw_ingredients, scale)
 
-    # Instructions
     instr = recipe_data.get("recipeInstructions")
     instructions = None
     if isinstance(instr, str):
@@ -192,7 +187,6 @@ async def _extract_from_jsonld(html: str, url: str, servings_override: Optional[
                     steps.append(text.strip())
         instructions = "\n\n".join(s for s in steps if s) or None
 
-    # Tags
     auto_tags = []
     for key in ("keywords", "recipeCategory", "recipeCuisine"):
         val = recipe_data.get(key)
@@ -219,7 +213,6 @@ async def _extract_from_jsonld(html: str, url: str, servings_override: Optional[
 
 
 def _find_recipe_in_jsonld(data) -> Optional[dict]:
-    """Recursively search JSON-LD data for a Recipe object."""
     if isinstance(data, dict):
         type_val = data.get("@type", "")
         if isinstance(type_val, list):
@@ -227,7 +220,6 @@ def _find_recipe_in_jsonld(data) -> Optional[dict]:
                 return data
         elif "Recipe" in str(type_val):
             return data
-        # Check @graph
         if "@graph" in data:
             result = _find_recipe_in_jsonld(data["@graph"])
             if result:
@@ -241,7 +233,6 @@ def _find_recipe_in_jsonld(data) -> Optional[dict]:
 
 
 async def _parse_ingredients(raw_ingredients: list, scale: float) -> list:
-    """Parse and scale a list of raw ingredient strings."""
     ingredients = []
     for line in raw_ingredients:
         line = str(line).strip()
@@ -275,7 +266,6 @@ async def _parse_ingredients(raw_ingredients: list, scale: float) -> list:
 
 
 def _parse_iso_duration(duration: str) -> Optional[int]:
-    """Parse ISO 8601 duration like PT30M or PT1H30M to minutes."""
     if not duration:
         return None
     hours = re.search(r'(\d+)H', duration)

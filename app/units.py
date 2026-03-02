@@ -88,29 +88,78 @@ def from_base_to_readable(amount: float, family: str) -> tuple[float, str]:
     """Convert base unit amount to a human-readable unit."""
     if family == "volume":
         if amount >= 128:
-            return round(amount / 128, 2), "gallon"
+            return round(amount / 128, 6), "gallon"
         elif amount >= 32:
-            return round(amount / 32, 2), "quart"
-        elif amount >= 8:
-            return round(amount / 8, 2), "cup"
+            return round(amount / 32, 6), "quart"
+        elif amount >= 2:          # >= 1/4 cup — display in cups
+            return round(amount / 8, 6), "cup"
         elif amount >= 0.5:
-            return round(amount / 0.5, 2), "tbsp"
+            return round(amount / 0.5, 4), "tbsp"
         else:
-            return round(amount / (1 / 6), 2), "tsp"
+            return round(amount / (1 / 6), 4), "tsp"
     elif family == "weight":
         if amount >= 16:
-            return round(amount / 16, 2), "lb"
+            return round(amount / 16, 4), "lb"
         else:
-            return round(amount, 2), "oz"
-    return round(amount, 2), ""
+            return round(amount, 4), "oz"
+    return round(amount, 4), ""
+
+
+# Cup fractions in ascending order: (decimal_value, unicode_symbol)
+_CUP_FRACS = [(1/8, "⅛"), (1/4, "¼"), (1/3, "⅓"), (1/2, "½"), (2/3, "⅔"), (3/4, "¾")]
+_FRAC_TOL = 0.04
+
+
+def _format_cups(amount: float) -> str:
+    """
+    Format a cup amount using common fractions.
+    For non-standard amounts, decomposes as 'X cup + Y tbsp' (like recipe cards).
+    """
+    whole = int(amount)
+    frac = amount - whole
+
+    # Try clean fraction match first
+    for val, sym in _CUP_FRACS:
+        if abs(frac - val) < _FRAC_TOL:
+            display = (str(whole) + sym) if whole > 0 else sym
+            return f"{display} cup"
+
+    # Whole number with negligible fraction
+    if frac < 0.02:
+        return f"{whole} cup"
+
+    # No clean fraction — find largest cup fraction that fits below frac
+    best_val, best_sym = 0.0, ""
+    for val, sym in _CUP_FRACS:
+        if val <= frac + 0.01:
+            best_val, best_sym = val, sym
+
+    remainder_tbsp = round((frac - best_val) * 16)
+
+    if remainder_tbsp == 0:
+        cup_display = (str(whole) + best_sym) if (whole > 0 and best_sym) else (best_sym or str(whole))
+        return f"{cup_display} cup"
+
+    # Build "X cup + Y tbsp"
+    if best_sym:
+        cup_part = (str(whole) + best_sym + " cup") if whole > 0 else (best_sym + " cup")
+    elif whole > 0:
+        cup_part = f"{whole} cup"
+    else:
+        cup_part = None
+
+    tbsp_part = f"{remainder_tbsp} tbsp"
+    return f"{cup_part} + {tbsp_part}" if cup_part else tbsp_part
 
 
 def format_quantity(amount: float, unit: str) -> str:
     """Format a quantity nicely, converting fractions where appropriate."""
     if amount is None:
         return unit.strip()
-    # Common fraction display
-    frac_map = {0.25: "¼", 0.5: "½", 0.75: "¾", 0.33: "⅓", 0.67: "⅔"}
+    if unit == "cup":
+        return _format_cups(amount)
+    # Common fraction display for non-cup units
+    frac_map = {0.125: "⅛", 0.25: "¼", 0.5: "½", 0.75: "¾", 0.33: "⅓", 0.67: "⅔"}
     whole = int(amount)
     frac = amount - whole
     frac_str = ""

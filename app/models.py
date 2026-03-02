@@ -61,6 +61,11 @@ class ShoppingListRecipeLink(SQLModel, table=True):
     shopping_list: Optional[ShoppingList] = Relationship(back_populates="recipe_links")
 
 
+class PantryItem(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    name: str = Field(index=True, unique=True)  # stored lowercase for matching
+
+
 class ShoppingListItem(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     shopping_list_id: int = Field(foreign_key="shoppinglist.id")
