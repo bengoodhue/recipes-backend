@@ -154,7 +154,7 @@ def parse_unit(text: str) -> tuple[str, str]:
     match = re.match(pattern, text, re.IGNORECASE)
     if match:
         unit = match.group(1).lower()
-        remaining = text[match.end():].strip()
+        remaining = text[match.end():].lstrip('.,;:').strip()
         unit = normalize_unit(unit)
         return unit, remaining
     return "", text
@@ -194,8 +194,14 @@ def normalize_unit(unit: str) -> str:
 
 def clean_ingredient_name(text: str) -> str:
     """Clean up ingredient name — remove descriptors, parentheticals, etc."""
-    # Remove parenthetical notes
+    # Remove price annotations first — handles ($0.55), $0.55, $0.55), ($0.55
+    text = re.sub(r'\(?\$[\d.,]+\)?', '', text).strip()
+
+    # Remove parenthetical notes (balanced parens)
     text = re.sub(r'\(.*?\)', '', text).strip()
+
+    # Remove any remaining unmatched closing parens
+    text = re.sub(r'\)[^)]*$', '', text).strip()
 
     # Split on comma and take first part
     if ',' in text:
@@ -215,7 +221,11 @@ def clean_ingredient_name(text: str) -> str:
         text = re.sub(rf'\b{word}\b', '', text, flags=re.IGNORECASE).strip()
 
     text = re.sub(r'\s+', ' ', text).strip()
-    return text
+
+    # Strip trailing punctuation (periods, commas, parens, semicolons)
+    text = text.rstrip('.,;:()')
+
+    return text.strip()
 
 
 def parse_ingredient_line(line: str) -> dict | None:
