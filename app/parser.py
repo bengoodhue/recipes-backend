@@ -197,18 +197,30 @@ def clean_ingredient_name(text: str) -> str:
     # Remove price annotations first — handles ($0.55), $0.55, $0.55), ($0.55
     text = re.sub(r'\(?\$[\d.,]+\)?', '', text).strip()
 
-    # Remove parenthetical notes (balanced parens)
-    text = re.sub(r'\(.*?\)', '', text).strip()
+    # Remove footnote markers like *, **, *** (used by Budget Bytes and others)
+    text = re.sub(r'\*+', '', text).strip()
 
-    # Remove any remaining unmatched closing parens
-    text = re.sub(r'\)[^)]*$', '', text).strip()
+    # Smart parenthetical handling:
+    # If the text before the paren has no trailing comma AND removing the paren
+    # would leave ≤ 1 word, the paren likely contains key ingredient info — flatten it.
+    # e.g. "boneless (skinless chicken thighs, trimmed)" → flatten → "boneless skinless chicken thighs, trimmed"
+    # e.g. "eggplant, (cut into 1/2-inch cubes)" → remove (comma before paren = prep note)
+    if '(' in text:
+        before_paren = text.split('(')[0].rstrip()
+        text_no_paren = re.sub(r'\(.*?\)', '', text).strip()
+        text_no_paren = re.sub(r'\)[^)]*$', '', text_no_paren).strip()
+        if not before_paren.endswith(',') and len(text_no_paren.split()) <= 1:
+            # Flatten: strip the paren characters but keep the content
+            text = re.sub(r'[()]', '', text).strip()
+        else:
+            text = text_no_paren
+    else:
+        text = re.sub(r'\)[^)]*$', '', text).strip()
 
-    # Split on comma and take first part
-    if ',' in text:
-        parts = text.split(',')
-        text = parts[0].strip()
+    # Remove any remaining stray parens (e.g. unmatched opening parens)
+    text = re.sub(r'[()]', '', text).strip()
 
-    # Remove trailing descriptors
+    # Cooking descriptors used for both comma-split and stop word removal
     stop_words = [
         'lightly', 'finely', 'coarsely', 'roughly', 'thinly', 'thickly',
         'freshly', 'well', 'loosely', 'packed', 'heaping', 'leveled',
@@ -217,8 +229,36 @@ def clean_ingredient_name(text: str) -> str:
         'toasted', 'roasted', 'cooked', 'softened', 'melted', 'divided',
         'optional', 'room temperature', 'at room temperature',
     ]
+
+    # Smart comma split: only break when the first word after a comma is a prep/stop word
+    # "boneless, skinless chicken thighs, trimmed" → "boneless skinless chicken thighs"
+    # "garlic, minced" → "garlic"
+    # "salt, to taste" → "salt"
+    if ',' in text:
+        _prep_starters = set(stop_words) | {'to', 'for', 'or', 'as', 'if', 'such', 'like', 'plus', 'including'}
+        parts = text.split(',')
+        kept = [parts[0]]
+        for part in parts[1:]:
+            words = part.strip().lower().split()
+            first_word = words[0] if words else ''
+            if first_word in _prep_starters:
+                break
+            kept.append(part.strip())
+        text = ' '.join(kept).strip()
+
+    # Remove trailing descriptors (including hyphenated compounds like "medium-diced")
     for word in stop_words:
-        text = re.sub(rf'\b{word}\b', '', text, flags=re.IGNORECASE).strip()
+        # Remove hyphenated compounds containing the stop word
+        # e.g. "medium-diced" or "finely-chopped" → removed entirely
+        text = re.sub(
+            rf'\b[a-zA-Z]+-{re.escape(word)}\b|\b{re.escape(word)}-[a-zA-Z]+\b',
+            '', text, flags=re.IGNORECASE
+        ).strip()
+        # Remove standalone stop word
+        text = re.sub(rf'\b{re.escape(word)}\b', '', text, flags=re.IGNORECASE).strip()
+
+    # Clean up orphaned hyphens left by partial compound removal (e.g. "medium-" → "medium")
+    text = re.sub(r'(?<=\w)-(?=\s|$)', '', text)
 
     text = re.sub(r'\s+', ' ', text).strip()
 
