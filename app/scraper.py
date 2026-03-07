@@ -63,7 +63,7 @@ async def extract_recipe(url: str, servings_override: Optional[int] = None) -> d
         raw_ingredients = _safe(scraper.ingredients) or []
         image_url = _safe(scraper.image)
         ready_in_minutes = _safe(scraper.total_time)
-        instructions = _safe(scraper.instructions)
+        instructions = None  # Not stored — users go back to the source site to cook
         yields_str = _safe(scraper.yields) or ""
         m = re.search(r'\d+', str(yields_str))
         if m:
@@ -172,20 +172,7 @@ async def _extract_from_jsonld(html: str, url: str, servings_override: Optional[
 
     ingredients = await _parse_ingredients(raw_ingredients, scale)
 
-    instr = recipe_data.get("recipeInstructions")
-    instructions = None
-    if isinstance(instr, str):
-        instructions = instr.strip()
-    elif isinstance(instr, list):
-        steps = []
-        for step in instr:
-            if isinstance(step, str):
-                steps.append(step.strip())
-            elif isinstance(step, dict):
-                text = step.get("text") or step.get("name") or ""
-                if text:
-                    steps.append(text.strip())
-        instructions = "\n\n".join(s for s in steps if s) or None
+    instructions = None  # Not stored — users go back to the source site to cook
 
     auto_tags = []
     for key in ("keywords", "recipeCategory", "recipeCuisine"):

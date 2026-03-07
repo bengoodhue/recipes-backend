@@ -180,8 +180,8 @@ async def lookup_aisle_spoonacular(name: str) -> str:
 
 
 async def lookup_aisle(name: str) -> str:
-    """Main lookup: local map first, Spoonacular fallback."""
+    """Main lookup: local map first, fall back to Other."""
     local = lookup_aisle_local(name)
     if local:
         return local
-    return await lookup_aisle_spoonacular(name)
+    return "Other"
