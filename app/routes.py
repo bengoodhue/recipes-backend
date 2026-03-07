@@ -46,6 +46,7 @@ class RecipeUpdateRequest(BaseModel):
     instructions: Optional[str] = None
     ingredients: Optional[list[dict]] = None
     url: Optional[str] = None
+    image_url: Optional[str] = None
 
 class ListCreateRequest(BaseModel):
     name: str
@@ -250,6 +251,8 @@ def update_recipe(recipe_id: int, req: RecipeUpdateRequest, session: Session = D
         recipe.instructions = req.instructions
     if req.url is not None:
         recipe.url = req.url
+    if req.image_url is not None:
+        recipe.image_url = req.image_url
     if req.ingredients is not None:
         recipe.ingredients_json = __import__('json').dumps(req.ingredients)
     if req.tags is not None:
