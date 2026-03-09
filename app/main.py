@@ -48,4 +48,7 @@ app.include_router(router, prefix="/api")
 
 @app.get("/health")
 def health():
-    return {"status": "ok"}
+    from .database import DATABASE_URL
+    db_type = "postgresql" if DATABASE_URL.startswith("postgresql") else "sqlite"
+    db_path = DATABASE_URL if db_type == "postgresql" else DATABASE_URL.split("///")[-1]
+    return {"status": "ok", "db": db_type, "db_path": db_path}

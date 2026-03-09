@@ -1,7 +1,10 @@
 from sqlmodel import SQLModel, create_engine, Session
 import os
 
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./grocery.db")
+# Default to a persistent-volume path on Railway (/data is mounted as a volume).
+# Falls back to local ./grocery.db for dev.  PostgreSQL takes priority if DATABASE_URL is set.
+_default_db = "sqlite:////data/grocery.db" if os.path.isdir("/data") else "sqlite:///./grocery.db"
+DATABASE_URL = os.getenv("DATABASE_URL", _default_db)
 
 # Railway (and Heroku) may provide postgres:// which SQLAlchemy doesn't accept
 if DATABASE_URL.startswith("postgres://"):
