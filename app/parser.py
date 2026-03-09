@@ -118,6 +118,8 @@ def parse_amount(text: str) -> tuple[float, str]:
         '⅝': '5/8', '⅞': '7/8',
     }
     for uf, replacement in unicode_fractions.items():
+        # "2½" → "2 1/2" (insert space when fraction directly follows a digit)
+        text = re.sub(r'(\d)' + re.escape(uf), r'\1 ' + replacement, text)
         text = text.replace(uf, replacement)
 
     text = text.strip()
