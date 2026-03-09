@@ -1,1 +1,1 @@
-export const API_BASE = "http://192.168.86.23:8000/api";
+export const API_BASE = "https://recipes-backend-production-9f90.up.railway.app/api";
