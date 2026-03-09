@@ -129,6 +129,17 @@ async def _extract_from_jsonld(html: str, url: str, servings_override: Optional[
             continue
 
     if not recipe_data:
+        # Try Article body fallback (Shopify/blog sites like Magnolia use @type:Article
+        # with all content in articleBody plain text instead of @type:Recipe schema)
+        for script in scripts:
+            try:
+                data = json.loads(script.strip())
+                body = _find_article_body(data)
+                if body:
+                    return await _extract_from_article_body(body, html, url, servings_override)
+            except Exception:
+                continue
+
         raise ValueError(
             f"Could not extract recipe data from this page "
             f"(wild_mode: {wild_mode_error}, searched {len(scripts)} JSON-LD blocks). "
@@ -217,6 +228,103 @@ def _find_recipe_in_jsonld(data) -> Optional[dict]:
             if result:
                 return result
     return None
+
+
+def _find_article_body(data) -> Optional[str]:
+    """Find articleBody in Article/BlogPosting JSON-LD that contains ingredient text."""
+    if isinstance(data, dict):
+        type_val = data.get("@type", "")
+        types = type_val if isinstance(type_val, list) else [type_val]
+        if any(t in ("Article", "BlogPosting", "NewsArticle") for t in types):
+            body = data.get("articleBody")
+            if body and "ingredient" in body.lower():
+                return body
+        if "@graph" in data:
+            result = _find_article_body(data["@graph"])
+            if result:
+                return result
+    elif isinstance(data, list):
+        for item in data:
+            result = _find_article_body(item)
+            if result:
+                return result
+    return None
+
+
+async def _extract_from_article_body(
+    article_body: str, html: str, url: str, servings_override: Optional[int]
+) -> dict:
+    """
+    Extract recipe from plain-text articleBody (Shopify/blog sites like Magnolia).
+    These sites use @type:Article with all recipe content as a single text blob.
+    """
+    # Title from <h1>
+    title = "Untitled Recipe"
+    h1_match = re.search(r'<h1[^>]*>(.*?)</h1>', html, re.DOTALL | re.IGNORECASE)
+    if h1_match:
+        raw_title = re.sub(r'<[^>]+>', '', h1_match.group(1)).strip()
+        if raw_title:
+            title = raw_title
+
+    # Parse ingredient lines from the article body text blob
+    lines = article_body.replace('\r\n', '\n').split('\n')
+    in_ingredients = False
+    raw_ingredients = []
+    _section_ends = ('directions', 'instructions', 'method', 'preparation', 'steps', 'procedure')
+
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        lower = stripped.lower()
+        if lower in ('ingredients', 'ingredient list', 'ingredients:'):
+            in_ingredients = True
+            continue
+        if in_ingredients and lower.rstrip(':') in _section_ends:
+            break
+        if in_ingredients:
+            # Skip ALL CAPS sub-headers like "BALSAMIC GRAPEFRUIT VINAIGRETTE"
+            if stripped == stripped.upper() and re.search(r'[A-Z]', stripped):
+                continue
+            raw_ingredients.append(stripped)
+
+    if not raw_ingredients:
+        raise ValueError(
+            "Found article content but could not extract ingredients. "
+            "Try entering the recipe manually."
+        )
+
+    # Image from og:image meta tag
+    image_url = None
+    og = re.search(
+        r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']',
+        html, re.IGNORECASE
+    )
+    if not og:
+        og = re.search(
+            r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image["\']',
+            html, re.IGNORECASE
+        )
+    if og:
+        image_url = og.group(1)
+
+    servings = servings_override or 4
+    ingredients = await _parse_ingredients(raw_ingredients, 1.0)
+
+    return {
+        "title": title,
+        "image_url": image_url,
+        "servings": servings,
+        "ready_in_minutes": None,
+        "summary": None,
+        "is_vegetarian": False,
+        "is_vegan": False,
+        "is_gluten_free": False,
+        "is_dairy_free": False,
+        "ingredients": ingredients,
+        "auto_tags": [],
+        "instructions": None,
+    }
 
 
 async def _parse_ingredients(raw_ingredients: list, scale: float) -> list:
