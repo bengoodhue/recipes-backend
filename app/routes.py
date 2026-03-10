@@ -382,16 +382,16 @@ def add_recipe_to_list(list_id: int, req: AddRecipeToListRequest, session: Sessi
         .where(ShoppingListRecipeLink.shopping_list_id == list_id)
         .where(ShoppingListRecipeLink.recipe_id == req.recipe_id)
     ).first()
-    if existing:
-        raise HTTPException(400, "Recipe already in list")
-
-    link = ShoppingListRecipeLink(
-        shopping_list_id=list_id,
-        recipe_id=req.recipe_id,
-        servings_override=req.servings_override,
-    )
-    session.add(link)
-    session.flush()
+    if not existing:
+        link = ShoppingListRecipeLink(
+            shopping_list_id=list_id,
+            recipe_id=req.recipe_id,
+            servings_override=req.servings_override,
+        )
+        session.add(link)
+        session.flush()
+    # If already linked (e.g. prior request crashed mid-rebuild), fall through
+    # and rebuild items so the list is consistent
 
     _rebuild_list_items(list_id, session)
     lst.updated_at = datetime.utcnow()
@@ -517,8 +517,8 @@ def _rebuild_list_items(list_id: int, session: Session):
             amount=agg.get("amount"),
             aisle=agg["aisle"],
             has_unit_conflict=agg["has_unit_conflict"],
-            source_recipe_ids_json=str(agg["source_recipe_ids_json"]),
-            conflict_details_json=str(agg["conflict_details_json"]),
+            source_recipe_ids_json=json.dumps(agg["source_recipe_ids_json"]),
+            conflict_details_json=json.dumps(agg["conflict_details_json"]),
             sort_order=i,
             is_pantry_staple=is_pantry,
         )
