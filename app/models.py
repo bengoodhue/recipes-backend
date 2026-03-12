@@ -80,6 +80,7 @@ class ShoppingListItem(SQLModel, table=True):
     source_recipe_ids_json: str = Field(default="[]")
     has_unit_conflict: bool = False
     conflict_details_json: str = Field(default="[]")
+    recipe_breakdown_json: str = Field(default="[]")
     sort_order: int = 0
     shopping_list: Optional[ShoppingList] = Relationship(back_populates="items")
 
@@ -92,3 +93,8 @@ class ShoppingListItem(SQLModel, table=True):
     def conflict_details(self):
         import json
         return json.loads(self.conflict_details_json)
+
+    @property
+    def recipe_breakdown(self):
+        import json
+        return json.loads(self.recipe_breakdown_json)

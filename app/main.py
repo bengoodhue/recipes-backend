@@ -33,13 +33,20 @@ def _migrate():
     if "recipe" not in inspector.get_table_names():
         return
 
-    existing = {col["name"] for col in inspector.get_columns("recipe")}
+    existing_recipe = {col["name"] for col in inspector.get_columns("recipe")}
 
     with engine.connect() as conn:
-        if "source" not in existing:
+        if "source" not in existing_recipe:
             conn.execute(text("ALTER TABLE recipe ADD COLUMN source TEXT"))
-        if "instructions" not in existing:
+        if "instructions" not in existing_recipe:
             conn.execute(text("ALTER TABLE recipe ADD COLUMN instructions TEXT"))
+
+        # Migrate shoppinglistitem table
+        if "shoppinglistitem" in inspector.get_table_names():
+            existing_item = {col["name"] for col in inspector.get_columns("shoppinglistitem")}
+            if "recipe_breakdown_json" not in existing_item:
+                conn.execute(text("ALTER TABLE shoppinglistitem ADD COLUMN recipe_breakdown_json TEXT DEFAULT '[]'"))
+
         conn.commit()
 
 
@@ -48,7 +55,4 @@ app.include_router(router, prefix="/api")
 
 @app.get("/health")
 def health():
-    from .database import DATABASE_URL
-    db_type = "postgresql" if DATABASE_URL.startswith("postgresql") else "sqlite"
-    db_path = DATABASE_URL if db_type == "postgresql" else DATABASE_URL.split("///")[-1]
-    return {"status": "ok", "db": db_type, "db_path": db_path}
+    return {"status": "ok"}

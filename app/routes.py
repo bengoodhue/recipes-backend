@@ -517,8 +517,9 @@ def _rebuild_list_items(list_id: int, session: Session):
             amount=agg.get("amount"),
             aisle=agg["aisle"],
             has_unit_conflict=agg["has_unit_conflict"],
-            source_recipe_ids_json=json.dumps(agg["source_recipe_ids_json"]),
-            conflict_details_json=json.dumps(agg["conflict_details_json"]),
+            source_recipe_ids_json=json.dumps(agg["source_recipe_ids"]),
+            conflict_details_json=json.dumps(agg["conflict_details"]),
+            recipe_breakdown_json=json.dumps(agg["recipe_breakdown"]),
             sort_order=i,
             is_pantry_staple=is_pantry,
         )
@@ -625,4 +626,5 @@ def _item_dict(item: ShoppingListItem) -> dict:
         "sort_order": item.sort_order,
         "source_recipe_ids": item.source_recipe_ids,
         "conflict_details": item.conflict_details,
+        "recipe_breakdown": item.recipe_breakdown,
     }

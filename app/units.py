@@ -185,10 +185,12 @@ class IngredientGroup:
         self.count_amounts: list[tuple[float, str]] = []
         self.unknown_entries: list[dict] = []
         self.source_recipe_ids: list[int] = []
+        self.recipe_contributions: list[dict] = []  # [{recipe_id, amount, unit}]
 
     def add(self, amount: float, unit: str, recipe_id: Optional[int] = None):
         if recipe_id is not None:
             self.source_recipe_ids.append(recipe_id)
+            self.recipe_contributions.append({"recipe_id": recipe_id, "amount": amount, "unit": unit})
         family = get_unit_family(unit)
         base, _ = to_base_unit(amount, unit)
         if family == "volume":
@@ -233,6 +235,122 @@ class IngredientGroup:
                                    "display_quantity": e["unit"].strip() or ""})
         return items
 
+    def to_recipe_breakdown(self) -> list[dict]:
+        """Return per-recipe contribution list for display (e.g. '1 cup → Tikka Masala')."""
+        result = []
+        for contrib in self.recipe_contributions:
+            amt = contrib["amount"]
+            unit = contrib["unit"]
+            if amt and amt > 0:
+                display = format_quantity(amt, unit)
+            elif unit:
+                display = unit.strip()
+            else:
+                display = ""
+            result.append({"recipe_id": contrib["recipe_id"], "display_quantity": display})
+        return result
+
+
+# Words that indicate a form/presentation of an ingredient rather than a distinct item.
+# These can appear at the end of a name and be stripped for grouping purposes.
+# e.g. "garlic cloves" → "garlic", "rosemary sprigs" → "rosemary"
+_TRAILING_FORM_WORDS = frozenset({
+    "clove", "cloves", "head", "heads", "stalk", "stalks",
+    "sprig", "sprigs", "bunch", "bunches", "slice", "slices",
+})
+
+# Leading words that describe quality/state and are safe to strip.
+# e.g. "fresh basil" → "basil", "frozen peas" → "peas"
+# Color words (red, yellow) are intentionally excluded to avoid merging
+# distinct ingredients like "red pepper" and "green pepper".
+_LEADING_QUALITY_WORDS = frozenset({
+    "fresh", "dried", "frozen", "baby", "whole", "organic", "raw",
+    "large", "small", "medium",
+})
+
+# Explicit synonym table for common ingredient variants that map to the same
+# shopping item.  Keys must be lowercase.  The value is the canonical display key.
+_INGREDIENT_SYNONYMS: dict[str, str] = {
+    # Onion varieties — all just mean "buy onions"
+    "onions": "onion",
+    "sweet onion": "onion",   "sweet onions": "onion",
+    "yellow onion": "onion",  "yellow onions": "onion",
+    "red onion": "onion",     "red onions": "onion",
+    "white onion": "onion",   "white onions": "onion",
+    "vidalia onion": "onion", "vidalia onions": "onion",
+    "vidalia": "onion",
+    "spanish onion": "onion", "spanish onions": "onion",
+    "pearl onion": "onion",   "pearl onions": "onion",
+    # Green onion / scallion — intentionally NOT merged with plain onion
+    "scallion": "green onion", "scallions": "green onion",
+    "spring onion": "green onion", "spring onions": "green onion",
+    # Shallot plural
+    "shallots": "shallot",
+    # Bell pepper varieties — all the same vegetable to buy
+    "bell peppers": "bell pepper",
+    "red bell pepper": "bell pepper",  "red bell peppers": "bell pepper",
+    "yellow bell pepper": "bell pepper", "yellow bell peppers": "bell pepper",
+    "orange bell pepper": "bell pepper", "orange bell peppers": "bell pepper",
+    "green bell pepper": "bell pepper", "green bell peppers": "bell pepper",
+    # Common plurals
+    "tomatoes": "tomato",
+    "potatoes": "potato",
+    "mushrooms": "mushroom",
+    "lemons": "lemon",
+    "limes": "lime",
+    "eggs": "egg",
+    "carrots": "carrot",
+    "celery stalks": "celery",
+    "garlic cloves": "garlic",  "garlic clove": "garlic",
+}
+
+
+def _canonical_key(name: str) -> str:
+    """
+    Normalize an ingredient name to a canonical grouping key.
+
+    Handles:
+    - Explicit synonyms (e.g. "yellow onion", "red onion" → "onion")
+    - "X or Y" alternate forms → picks the shorter/simpler core form
+      (e.g. "garlic paste or garlic" → "garlic")
+    - Leading quality/state words (e.g. "fresh basil" → "basil")
+    - Trailing form words (e.g. "garlic cloves" → "garlic")
+    """
+    key = name.lower().strip()
+
+    # Check synonym map first (covers the most common cases directly)
+    if key in _INGREDIENT_SYNONYMS:
+        return _INGREDIENT_SYNONYMS[key]
+
+    # Handle "X or Y" alternates — find the simplest shared core
+    if " or " in key:
+        parts = [p.strip() for p in key.split(" or ")]
+        parts_by_len = sorted(parts, key=len)
+        shortest = parts_by_len[0]
+        # Use shortest only when it's a word-level prefix of all the others
+        # e.g. "garlic" is a prefix of "garlic paste" → use "garlic"
+        # but "beef" is NOT a prefix of "chicken" → keep first alternative
+        if all(p.startswith(shortest) for p in parts_by_len[1:]):
+            key = shortest
+        else:
+            key = parts[0]
+        if key in _INGREDIENT_SYNONYMS:
+            return _INGREDIENT_SYNONYMS[key]
+
+    # Strip a single leading quality/state word (e.g. "fresh basil" → "basil")
+    words = key.split()
+    if len(words) > 1 and words[0] in _LEADING_QUALITY_WORDS:
+        words = words[1:]
+        key = " ".join(words)
+        if key in _INGREDIENT_SYNONYMS:
+            return _INGREDIENT_SYNONYMS[key]
+
+    # Strip trailing form words (e.g. "garlic cloves" → "garlic")
+    while len(words) > 1 and words[-1] in _TRAILING_FORM_WORDS:
+        words.pop()
+
+    return " ".join(words)
+
 
 def aggregate_ingredients(ingredient_lists: list[list[dict]], recipe_ids: list[int]) -> list[dict]:
     """
@@ -245,9 +363,14 @@ def aggregate_ingredients(ingredient_lists: list[list[dict]], recipe_ids: list[i
 
     for ing_list, recipe_id in zip(ingredient_lists, recipe_ids):
         for ing in ing_list:
-            key = ing["name"].lower().strip()
+            key = _canonical_key(ing["name"])
             if key not in groups:
                 groups[key] = IngredientGroup(ing["name"], ing.get("aisle", ""))
+            else:
+                # When multiple names map to the same key, keep the shortest/simplest
+                # e.g. "garlic" is a better display name than "garlic cloves"
+                if len(ing["name"]) < len(groups[key].name):
+                    groups[key].name = ing["name"]
             groups[key].add(ing.get("amount", 0), ing.get("unit", ""), recipe_id)
 
     result = []
@@ -273,8 +396,9 @@ def aggregate_ingredients(ingredient_lists: list[list[dict]], recipe_ids: list[i
             "amount": amount,
             "aisle": group.aisle,
             "has_unit_conflict": group.has_conflict,
-            "source_recipe_ids_json": str(list(set(group.source_recipe_ids))),
-            "conflict_details_json": str(display_items) if group.has_conflict else "[]",
+            "source_recipe_ids": list(set(group.source_recipe_ids)),
+            "conflict_details": display_items if group.has_conflict else [],
+            "recipe_breakdown": group.to_recipe_breakdown(),
         })
 
     return result
