@@ -76,6 +76,7 @@ class ShoppingListItem(SQLModel, table=True):
     aisle: Optional[str] = None
     is_pantry_staple: bool = False
     is_checked: bool = False
+    checked_at: Optional[datetime] = None
     is_manual: bool = False
     source_recipe_ids_json: str = Field(default="[]")
     has_unit_conflict: bool = False

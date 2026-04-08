@@ -1,20 +1,21 @@
+import asyncio
 import json
 import re
 from typing import Optional
-from playwright.async_api import async_playwright
+from playwright.sync_api import sync_playwright
 from recipe_scrapers import scrape_html
 from .aisles import lookup_aisle
 from .parser import parse_ingredient_line
 
 
-async def _fetch_html(url: str) -> str:
-    """Fetch page HTML using a headless Chromium browser."""
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(
+def _fetch_html_sync(url: str) -> str:
+    """Fetch page HTML using a headless Chromium browser (sync, run in thread)."""
+    with sync_playwright() as p:
+        browser = p.chromium.launch(
             headless=True,
             args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]
         )
-        context = await browser.new_context(
+        context = browser.new_context(
             user_agent=(
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -22,20 +23,29 @@ async def _fetch_html(url: str) -> str:
             ),
             viewport={"width": 1280, "height": 800},
         )
-        page = await context.new_page()
+        page = context.new_page()
         try:
-            response = await page.goto(url, wait_until="domcontentloaded", timeout=20000)
+            response = page.goto(url, wait_until="domcontentloaded", timeout=30000)
             if response and response.status != 200:
                 raise ValueError(
                     f"Could not load page (HTTP {response.status}). "
                     "The site may be blocking imports."
                 )
-            # Wait a moment for JS to render recipe schema
-            await page.wait_for_timeout(1500)
-            html = await page.content()
+            # Wait for network to settle so JS-rendered recipe schema is in the DOM.
+            # Falls back to a fixed wait if the page has continuous background requests.
+            try:
+                page.wait_for_load_state("networkidle", timeout=8000)
+            except Exception:
+                page.wait_for_timeout(3000)
+            html = page.content()
         finally:
-            await browser.close()
+            browser.close()
     return html
+
+
+async def _fetch_html(url: str) -> str:
+    """Run the sync Playwright fetch in a thread to avoid Windows asyncio subprocess limits."""
+    return await asyncio.to_thread(_fetch_html_sync, url)
 
 
 async def extract_recipe(url: str, servings_override: Optional[int] = None) -> dict:

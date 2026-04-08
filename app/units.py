@@ -254,9 +254,12 @@ class IngredientGroup:
 # Words that indicate a form/presentation of an ingredient rather than a distinct item.
 # These can appear at the end of a name and be stripped for grouping purposes.
 # e.g. "garlic cloves" → "garlic", "rosemary sprigs" → "rosemary"
+# e.g. "lemon zest" → "lemon", "lemon juice" → "lemon", "lemon peel" → "lemon"
 _TRAILING_FORM_WORDS = frozenset({
     "clove", "cloves", "head", "heads", "stalk", "stalks",
     "sprig", "sprigs", "bunch", "bunches", "slice", "slices",
+    "zest", "juice", "peel", "rind", "skin", "extract", "puree", "pulp",
+    "powder", "flakes", "leaves", "leaf",
 })
 
 # Leading words that describe quality/state and are safe to strip.
@@ -266,6 +269,14 @@ _TRAILING_FORM_WORDS = frozenset({
 _LEADING_QUALITY_WORDS = frozenset({
     "fresh", "dried", "frozen", "baby", "whole", "organic", "raw",
     "large", "small", "medium",
+    "juiced", "zested", "squeezed", "peeled", "grated", "minced",
+    "chopped", "diced", "sliced", "crushed", "ground",
+})
+
+# Form words that appear before "of" in patterns like "zest of lemon" → "lemon".
+_OF_FORM_WORDS = frozenset({
+    "zest", "juice", "peel", "rind", "skin", "extract", "puree",
+    "pulp", "powder", "slice", "slices",
 })
 
 # Explicit synonym table for common ingredient variants that map to the same
@@ -321,6 +332,16 @@ def _canonical_key(name: str) -> str:
     # Check synonym map first (covers the most common cases directly)
     if key in _INGREDIENT_SYNONYMS:
         return _INGREDIENT_SYNONYMS[key]
+
+    # Handle "X of Y" form patterns — e.g. "zest of lemon" → "lemon"
+    if " of " in key:
+        of_idx = key.index(" of ")
+        form_part = key[:of_idx].strip()
+        ingredient_part = key[of_idx + 4:].strip()
+        if form_part in _OF_FORM_WORDS:
+            key = ingredient_part
+            if key in _INGREDIENT_SYNONYMS:
+                return _INGREDIENT_SYNONYMS[key]
 
     # Handle "X or Y" alternates — find the simplest shared core
     if " or " in key:

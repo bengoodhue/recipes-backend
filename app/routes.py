@@ -441,6 +441,7 @@ def update_item(list_id: int, item_id: int, req: UpdateItemRequest, session: Ses
         raise HTTPException(404)
     if req.is_checked is not None:
         item.is_checked = req.is_checked
+        item.checked_at = datetime.utcnow() if req.is_checked else None
     if req.is_pantry_staple is not None:
         item.is_pantry_staple = req.is_pantry_staple
     if req.display_quantity is not None:
@@ -621,6 +622,7 @@ def _item_dict(item: ShoppingListItem) -> dict:
         "aisle": item.aisle,
         "is_pantry_staple": item.is_pantry_staple,
         "is_checked": item.is_checked,
+        "checked_at": item.checked_at.isoformat() if item.checked_at else None,
         "is_manual": item.is_manual,
         "has_unit_conflict": item.has_unit_conflict,
         "sort_order": item.sort_order,
