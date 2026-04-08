@@ -1,5 +1,5 @@
 from sqlmodel import SQLModel, create_engine, Session
-from sqlalchemy import text
+from sqlalchemy import text, inspect
 import os
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./grocery.db")
@@ -19,11 +19,14 @@ def create_db():
 
 
 def _run_migrations():
-    """Add columns that didn't exist in older schema versions."""
+    """Add columns that didn't exist in older schema versions. Works on both SQLite and PostgreSQL."""
+    inspector = inspect(engine)
+    if "shoppinglistitem" not in inspector.get_table_names():
+        return
+    existing = {col["name"] for col in inspector.get_columns("shoppinglistitem")}
     with engine.connect() as conn:
-        existing = {row[1] for row in conn.execute(text("PRAGMA table_info(shoppinglistitem)"))}
         if "checked_at" not in existing:
-            conn.execute(text("ALTER TABLE shoppinglistitem ADD COLUMN checked_at DATETIME"))
+            conn.execute(text("ALTER TABLE shoppinglistitem ADD COLUMN checked_at TIMESTAMP"))
             conn.commit()
 
 
