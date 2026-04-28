@@ -10,6 +10,7 @@ Strategy:
 
 from typing import Optional
 import math
+import re
 
 # Volume conversions to fl_oz
 VOLUME_TO_FL_OZ = {
@@ -187,10 +188,10 @@ class IngredientGroup:
         self.source_recipe_ids: list[int] = []
         self.recipe_contributions: list[dict] = []  # [{recipe_id, amount, unit}]
 
-    def add(self, amount: float, unit: str, recipe_id: Optional[int] = None):
+    def add(self, amount: float, unit: str, recipe_id: Optional[int] = None, original_name: str = ""):
         if recipe_id is not None:
             self.source_recipe_ids.append(recipe_id)
-            self.recipe_contributions.append({"recipe_id": recipe_id, "amount": amount, "unit": unit})
+            self.recipe_contributions.append({"recipe_id": recipe_id, "amount": amount, "unit": unit, "name": original_name})
         family = get_unit_family(unit)
         base, _ = to_base_unit(amount, unit)
         if family == "volume":
@@ -241,12 +242,14 @@ class IngredientGroup:
         for contrib in self.recipe_contributions:
             amt = contrib["amount"]
             unit = contrib["unit"]
+            original = contrib.get("name", "")
             if amt and amt > 0:
-                display = format_quantity(amt, unit)
+                qty = format_quantity(amt, unit)
+                display = f"{qty} {original}".strip() if original else qty
             elif unit:
-                display = unit.strip()
+                display = f"{unit.strip()} {original}".strip() if original else unit.strip()
             else:
-                display = ""
+                display = original
             result.append({"recipe_id": contrib["recipe_id"], "display_quantity": display})
         return result
 
@@ -267,7 +270,7 @@ _TRAILING_FORM_WORDS = frozenset({
 # Color words (red, yellow) are intentionally excluded to avoid merging
 # distinct ingredients like "red pepper" and "green pepper".
 _LEADING_QUALITY_WORDS = frozenset({
-    "fresh", "dried", "frozen", "baby", "whole", "organic", "raw",
+    "fresh", "frozen", "baby", "whole", "organic", "raw",
     "large", "small", "medium",
     "juiced", "zested", "squeezed", "peeled", "grated", "minced",
     "chopped", "diced", "sliced", "crushed", "ground",
@@ -333,12 +336,14 @@ def _canonical_key(name: str) -> str:
     if key in _INGREDIENT_SYNONYMS:
         return _INGREDIENT_SYNONYMS[key]
 
-    # Handle "X of Y" form patterns — e.g. "zest of lemon" → "lemon"
+    # Handle "X of Y" form patterns — e.g. "zest of lemon" → "lemon", "zest of 1 lemon" → "lemon"
     if " of " in key:
         of_idx = key.index(" of ")
         form_part = key[:of_idx].strip()
         ingredient_part = key[of_idx + 4:].strip()
         if form_part in _OF_FORM_WORDS:
+            # Strip leading count ("1 lime" → "lime", "2 lemons" → "lemons")
+            ingredient_part = re.sub(r'^\d+\s*', '', ingredient_part).strip()
             key = ingredient_part
             if key in _INGREDIENT_SYNONYMS:
                 return _INGREDIENT_SYNONYMS[key]
@@ -386,13 +391,8 @@ def aggregate_ingredients(ingredient_lists: list[list[dict]], recipe_ids: list[i
         for ing in ing_list:
             key = _canonical_key(ing["name"])
             if key not in groups:
-                groups[key] = IngredientGroup(ing["name"], ing.get("aisle", ""))
-            else:
-                # When multiple names map to the same key, keep the shortest/simplest
-                # e.g. "garlic" is a better display name than "garlic cloves"
-                if len(ing["name"]) < len(groups[key].name):
-                    groups[key].name = ing["name"]
-            groups[key].add(ing.get("amount", 0), ing.get("unit", ""), recipe_id)
+                groups[key] = IngredientGroup(key, ing.get("aisle", ""))
+            groups[key].add(ing.get("amount", 0), ing.get("unit", ""), recipe_id, ing.get("name", ""))
 
     result = []
     for key, group in groups.items():

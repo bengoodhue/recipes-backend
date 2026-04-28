@@ -227,8 +227,9 @@ def clean_ingredient_name(text: str) -> str:
         'lightly', 'finely', 'coarsely', 'roughly', 'thinly', 'thickly',
         'freshly', 'well', 'loosely', 'packed', 'heaping', 'leveled',
         'beaten', 'chopped', 'minced', 'diced', 'sliced', 'grated',
-        'shredded', 'peeled', 'trimmed', 'halved', 'quartered', 'crushed',
-        'toasted', 'roasted', 'cooked', 'softened', 'melted', 'divided',
+        'shredded', 'peeled', 'seeded', 'pitted', 'trimmed', 'halved',
+        'quartered', 'crushed', 'toasted', 'roasted', 'cooked', 'softened',
+        'melted', 'divided', 'matchstick', 'julienned', 'shaved',
         'optional', 'room temperature', 'at room temperature',
     ]
 
@@ -263,6 +264,9 @@ def clean_ingredient_name(text: str) -> str:
     text = re.sub(r'(?<=\w)-(?=\s|$)', '', text)
 
     text = re.sub(r'\s+', ' ', text).strip()
+
+    # Strip leading conjunctions orphaned by prep-word removal ("and ginger" → "ginger")
+    text = re.sub(r'^(and|or|with|plus)\s+', '', text, flags=re.IGNORECASE).strip()
 
     # Strip trailing punctuation (periods, commas, parens, semicolons)
     text = text.rstrip('.,;:()')
