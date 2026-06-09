@@ -253,22 +253,19 @@ def add_recipe_to_list(list_id: int, req: AddRecipeToListRequest, session: Sessi
     if not recipe:
         raise HTTPException(404, "Recipe not found")
 
-    # Check not already added
     existing = session.exec(
         select(ShoppingListRecipeLink)
         .where(ShoppingListRecipeLink.shopping_list_id == list_id)
         .where(ShoppingListRecipeLink.recipe_id == req.recipe_id)
     ).first()
-    if existing:
-        raise HTTPException(400, "Recipe already in list")
-
-    link = ShoppingListRecipeLink(
-        shopping_list_id=list_id,
-        recipe_id=req.recipe_id,
-        servings_override=req.servings_override,
-    )
-    session.add(link)
-    session.flush()
+    if not existing:
+        link = ShoppingListRecipeLink(
+            shopping_list_id=list_id,
+            recipe_id=req.recipe_id,
+            servings_override=req.servings_override,
+        )
+        session.add(link)
+        session.flush()
 
     _rebuild_list_items(list_id, session)
     lst.updated_at = datetime.utcnow()
