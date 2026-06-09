@@ -11,6 +11,7 @@ Strategy:
 from typing import Optional
 import json
 import math
+import re
 
 # Volume conversions to fl_oz
 VOLUME_TO_FL_OZ = {
@@ -124,6 +125,16 @@ def format_quantity(amount: float, unit: str) -> str:
     return f"{display} {unit}".strip()
 
 
+def _find_canonical_key(name: str, mappings: dict[str, str]) -> Optional[str]:
+    """Return the longest aisle-seed key that appears as a whole word in name, or None."""
+    if name in mappings:
+        return name
+    for key in sorted(mappings, key=len, reverse=True):
+        if re.search(r'\b' + re.escape(key) + r'\b', name):
+            return key
+    return None
+
+
 class IngredientGroup:
     """Accumulates amounts for a single named ingredient."""
 
@@ -135,14 +146,15 @@ class IngredientGroup:
         self.count_amounts: list[tuple[float, str]] = []
         self.unknown_entries: list[dict] = []
         self.source_recipe_ids: list[int] = []
-        self.per_recipe_amounts: dict[int, list[tuple[float, str]]] = {}
+        # (amount, unit, original_ingredient_name)
+        self.per_recipe_amounts: dict[int, list[tuple[float, str, str]]] = {}
 
-    def add(self, amount: float, unit: str, recipe_id: Optional[int] = None):
+    def add(self, amount: float, unit: str, recipe_id: Optional[int] = None, original_name: str = ""):
         if recipe_id is not None:
             self.source_recipe_ids.append(recipe_id)
             if recipe_id not in self.per_recipe_amounts:
                 self.per_recipe_amounts[recipe_id] = []
-            self.per_recipe_amounts[recipe_id].append((amount, unit))
+            self.per_recipe_amounts[recipe_id].append((amount, unit, original_name))
         family = get_unit_family(unit)
         base, _ = to_base_unit(amount, unit)
         if family == "volume":
@@ -181,21 +193,32 @@ class IngredientGroup:
         return items
 
 
-def aggregate_ingredients(ingredient_lists: list[list[dict]], recipe_ids: list[int]) -> list[dict]:
+def aggregate_ingredients(
+    ingredient_lists: list[list[dict]],
+    recipe_ids: list[int],
+    aisle_mappings: Optional[dict[str, str]] = None,
+) -> list[dict]:
     """
     Takes multiple lists of ingredients (one per recipe) and aggregates them.
     Returns a flat list of shopping item dicts ready for DB insertion.
 
     Each ingredient dict expected: {name, amount, unit, aisle}
+    aisle_mappings: the aisle seed dict; when provided, ingredients that share the
+    same canonical seed key (e.g. "lime", "lime juice", "lime wedge" → "lime") are
+    merged into one shopping-list item.
     """
     groups: dict[str, IngredientGroup] = {}
 
     for ing_list, recipe_id in zip(ingredient_lists, recipe_ids):
         for ing in ing_list:
-            key = ing["name"].lower().strip()
+            original_name = ing["name"]
+            raw = original_name.lower().strip()
+            canonical = _find_canonical_key(raw, aisle_mappings) if aisle_mappings else None
+            key = canonical or raw
+            display_name = canonical.capitalize() if canonical else original_name
             if key not in groups:
-                groups[key] = IngredientGroup(ing["name"], ing.get("aisle", ""))
-            groups[key].add(ing.get("amount", 0), ing.get("unit", ""), recipe_id)
+                groups[key] = IngredientGroup(display_name, ing.get("aisle", ""))
+            groups[key].add(ing.get("amount", 0), ing.get("unit", ""), recipe_id, original_name)
 
     result = []
     for key, group in groups.items():
@@ -215,7 +238,10 @@ def aggregate_ingredients(ingredient_lists: list[list[dict]], recipe_ids: list[i
 
         breakdown = []
         for rid, entries in group.per_recipe_amounts.items():
-            parts = [format_quantity(a, u) if a else (u or "some") for a, u in entries]
+            parts = []
+            for a, u, orig in entries:
+                qty = format_quantity(a, u) if a else (u or "")
+                parts.append(f"{qty} {orig}".strip() if orig else qty)
             breakdown.append({"recipe_id": rid, "display": " + ".join(p for p in parts if p) or "some"})
 
         result.append({

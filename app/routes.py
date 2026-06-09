@@ -429,7 +429,7 @@ def _rebuild_list_items(list_id: int, session: Session):
         ingredient_lists.append(ings)
         recipe_ids.append(link.recipe_id)
 
-    aggregated = aggregate_ingredients(ingredient_lists, recipe_ids)
+    aggregated = aggregate_ingredients(ingredient_lists, recipe_ids, _load_aisle_mappings(session))
 
     for i, agg in enumerate(aggregated):
         item = ShoppingListItem(
