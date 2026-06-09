@@ -1,6 +1,7 @@
 fastapi
 uvicorn[standard]
 sqlmodel
+psycopg2-binary
 curl-cffi
 ingredient-parser-nlp
 python-dotenv
