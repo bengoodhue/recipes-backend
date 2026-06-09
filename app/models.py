@@ -83,6 +83,7 @@ class ShoppingListItem(SQLModel, table=True):
     has_unit_conflict: bool = False
     conflict_details_json: str = Field(default="[]")  # raw conflicting entries
     sort_order: int = 0
+    recipe_breakdown_json: str = Field(default="[]")
     shopping_list: Optional[ShoppingList] = Relationship(back_populates="items")
 
     @property
