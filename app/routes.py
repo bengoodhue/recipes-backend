@@ -440,8 +440,9 @@ def _rebuild_list_items(list_id: int, session: Session):
             amount=agg.get("amount"),
             aisle=agg["aisle"],
             has_unit_conflict=agg["has_unit_conflict"],
-            source_recipe_ids_json=json.dumps(agg["source_recipe_ids_json"]),
-            conflict_details_json=json.dumps(agg["conflict_details_json"]),
+            source_recipe_ids_json=agg["source_recipe_ids_json"],
+            conflict_details_json=agg["conflict_details_json"],
+            recipe_breakdown_json=agg.get("recipe_breakdown_json", "[]"),
             sort_order=i,
         )
         session.add(item)
@@ -477,11 +478,16 @@ def _list_response(lst: ShoppingList, session: Session) -> dict:
     links = session.exec(
         select(ShoppingListRecipeLink).where(ShoppingListRecipeLink.shopping_list_id == lst.id)
     ).all()
-    recipe_ids = [l.recipe_id for l in links]
+    recipes = []
+    for link in links:
+        recipe = session.get(Recipe, link.recipe_id)
+        if recipe:
+            recipes.append({"id": recipe.id, "title": recipe.title, "image_url": recipe.image_url})
     return {
         **_list_summary(lst),
         "items": [_item_dict(i) for i in items],
-        "recipe_ids": recipe_ids,
+        "recipe_ids": [r["id"] for r in recipes],
+        "recipes": recipes,
     }
 
 
@@ -509,4 +515,5 @@ def _item_dict(item: ShoppingListItem) -> dict:
         "sort_order": item.sort_order,
         "source_recipe_ids": item.source_recipe_ids,
         "conflict_details": item.conflict_details,
+        "recipe_breakdown": json.loads(item.recipe_breakdown_json),
     }

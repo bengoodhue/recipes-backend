@@ -9,6 +9,7 @@ Strategy:
 """
 
 from typing import Optional
+import json
 import math
 
 # Volume conversions to fl_oz
@@ -134,10 +135,14 @@ class IngredientGroup:
         self.count_amounts: list[tuple[float, str]] = []
         self.unknown_entries: list[dict] = []
         self.source_recipe_ids: list[int] = []
+        self.per_recipe_amounts: dict[int, list[tuple[float, str]]] = {}
 
     def add(self, amount: float, unit: str, recipe_id: Optional[int] = None):
         if recipe_id is not None:
             self.source_recipe_ids.append(recipe_id)
+            if recipe_id not in self.per_recipe_amounts:
+                self.per_recipe_amounts[recipe_id] = []
+            self.per_recipe_amounts[recipe_id].append((amount, unit))
         family = get_unit_family(unit)
         base, _ = to_base_unit(amount, unit)
         if family == "volume":
@@ -208,6 +213,11 @@ def aggregate_ingredients(ingredient_lists: list[list[dict]], recipe_ids: list[i
             unit = display_items[0]["unit"]
             amount = display_items[0]["amount"]
 
+        breakdown = []
+        for rid, entries in group.per_recipe_amounts.items():
+            parts = [format_quantity(a, u) if a else (u or "some") for a, u in entries]
+            breakdown.append({"recipe_id": rid, "display": " + ".join(p for p in parts if p) or "some"})
+
         result.append({
             "name": group.name,
             "display_quantity": display_quantity,
@@ -215,8 +225,9 @@ def aggregate_ingredients(ingredient_lists: list[list[dict]], recipe_ids: list[i
             "amount": amount,
             "aisle": group.aisle,
             "has_unit_conflict": group.has_conflict,
-            "source_recipe_ids_json": str(list(set(group.source_recipe_ids))),
-            "conflict_details_json": str(display_items) if group.has_conflict else "[]",
+            "source_recipe_ids_json": json.dumps(list(set(group.source_recipe_ids))),
+            "conflict_details_json": json.dumps(display_items) if group.has_conflict else "[]",
+            "recipe_breakdown_json": json.dumps(breakdown),
         })
 
     return result
