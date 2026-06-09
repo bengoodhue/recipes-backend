@@ -4,6 +4,12 @@ from datetime import datetime
 import json
 
 
+class IngredientAisle(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    name: str = Field(index=True, unique=True)  # normalized lowercase
+    aisle: str
+
+
 class RecipeTagLink(SQLModel, table=True):
     recipe_id: Optional[int] = Field(default=None, foreign_key="recipe.id", primary_key=True)
     tag_id: Optional[int] = Field(default=None, foreign_key="tag.id", primary_key=True)

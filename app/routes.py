@@ -1,3 +1,5 @@
+import re
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlmodel import Session, select
 from typing import Optional
@@ -6,10 +8,11 @@ import json
 from datetime import datetime
 
 from .models import (Recipe, Tag, RecipeTagLink, ShoppingList,
-                      ShoppingListItem, ShoppingListRecipeLink)
-from .spoonacular import extract_recipe
+                      ShoppingListItem, ShoppingListRecipeLink, IngredientAisle)
+from .scraper import extract_recipe
 from .units import aggregate_ingredients
 from .database import get_session
+from .aisle_seeds import AISLE_SEEDS
 
 router = APIRouter()
 
@@ -50,6 +53,32 @@ class UpdateItemRequest(BaseModel):
     display_quantity: Optional[str] = None
     sort_order: Optional[int] = None
 
+class AisleMappingRequest(BaseModel):
+    name: str
+    aisle: str
+
+class BulkAisleMappingRequest(BaseModel):
+    mappings: list[AisleMappingRequest]
+
+
+# ─── Aisle resolution ─────────────────────────────────────────────────────────
+
+def _load_aisle_mappings(session: Session) -> dict[str, str]:
+    return {row.name: row.aisle for row in session.exec(select(IngredientAisle)).all()}
+
+def _resolve_aisle(name: str, mappings: dict[str, str]) -> str:
+    normalized = name.lower().strip()
+    if normalized in mappings:
+        return mappings[normalized]
+    for key in sorted(mappings, key=len, reverse=True):
+        if re.search(r'\b' + re.escape(key) + r'\b', normalized):
+            return mappings[key]
+    return ""
+
+def _apply_aisles(ingredients: list[dict], session: Session) -> list[dict]:
+    mappings = _load_aisle_mappings(session)
+    return [{**ing, "aisle": _resolve_aisle(ing["name"], mappings)} for ing in ingredients]
+
 
 # ─── Tags ─────────────────────────────────────────────────────────────────────
 
@@ -66,6 +95,7 @@ def tag_suggestions(q: str = Query(""), session: Session = Depends(get_session))
 async def import_recipe(req: RecipeImportRequest, session: Session = Depends(get_session)):
     """Extract a recipe from a URL via Spoonacular and save it."""
     data = await extract_recipe(req.url, req.servings_override)
+    data["ingredients"] = _apply_aisles(data["ingredients"], session)
 
     recipe = Recipe(
         url=req.url,
@@ -303,6 +333,65 @@ def delete_item(list_id: int, item_id: int, session: Session = Depends(get_sessi
     if not item or item.shopping_list_id != list_id:
         raise HTTPException(404)
     session.delete(item)
+    session.commit()
+    return {"ok": True}
+
+
+# ─── Admin: Aisle Mappings ────────────────────────────────────────────────────
+
+@router.get("/admin/aisles")
+def list_aisles(session: Session = Depends(get_session)):
+    return session.exec(
+        select(IngredientAisle).order_by(IngredientAisle.aisle, IngredientAisle.name)
+    ).all()
+
+
+@router.post("/admin/aisles")
+def upsert_aisle(req: AisleMappingRequest, session: Session = Depends(get_session)):
+    name = req.name.lower().strip()
+    row = session.exec(select(IngredientAisle).where(IngredientAisle.name == name)).first()
+    if row:
+        row.aisle = req.aisle.strip()
+    else:
+        row = IngredientAisle(name=name, aisle=req.aisle.strip())
+        session.add(row)
+    session.commit()
+    session.refresh(row)
+    return row
+
+
+@router.post("/admin/aisles/bulk")
+def bulk_upsert_aisles(req: BulkAisleMappingRequest, session: Session = Depends(get_session)):
+    for item in req.mappings:
+        name = item.name.lower().strip()
+        row = session.exec(select(IngredientAisle).where(IngredientAisle.name == name)).first()
+        if row:
+            row.aisle = item.aisle.strip()
+        else:
+            session.add(IngredientAisle(name=name, aisle=item.aisle.strip()))
+    session.commit()
+    return {"upserted": len(req.mappings)}
+
+
+@router.post("/admin/aisles/seed")
+def seed_aisles(session: Session = Depends(get_session)):
+    existing = session.exec(select(IngredientAisle)).first()
+    if existing:
+        return {"skipped": True, "reason": "Aisle mappings already exist"}
+    for name, aisle in AISLE_SEEDS.items():
+        session.add(IngredientAisle(name=name, aisle=aisle))
+    session.commit()
+    return {"seeded": len(AISLE_SEEDS)}
+
+
+@router.delete("/admin/aisles/{name}")
+def delete_aisle(name: str, session: Session = Depends(get_session)):
+    row = session.exec(
+        select(IngredientAisle).where(IngredientAisle.name == name.lower().strip())
+    ).first()
+    if not row:
+        raise HTTPException(404, "Mapping not found")
+    session.delete(row)
     session.commit()
     return {"ok": True}
 

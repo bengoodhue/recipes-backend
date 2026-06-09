@@ -1,5 +1,6 @@
 fastapi
 uvicorn[standard]
 sqlmodel
-httpx
+curl-cffi
+ingredient-parser-nlp
 python-dotenv

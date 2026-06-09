@@ -1,3 +1,4 @@
+import nltk
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
@@ -21,6 +22,7 @@ app.add_middleware(
 @app.on_event("startup")
 def on_startup():
     create_db()
+    nltk.download("averaged_perceptron_tagger_eng", quiet=True)
 
 
 app.include_router(router, prefix="/api")
