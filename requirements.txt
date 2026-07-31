@@ -2,6 +2,7 @@ fastapi
 uvicorn[standard]
 sqlmodel
 psycopg2-binary
-curl-cffi
-ingredient-parser-nlp
+httpx
 python-dotenv
+recipe-scrapers
+playwright

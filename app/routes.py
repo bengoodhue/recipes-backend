@@ -1,20 +1,31 @@
-import re
-
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlmodel import Session, select
 from typing import Optional
 from pydantic import BaseModel
+from urllib.parse import urlparse
 import json
+import re
 from datetime import datetime
 
 from .models import (Recipe, Tag, RecipeTagLink, ShoppingList,
-                      ShoppingListItem, ShoppingListRecipeLink, IngredientAisle)
+                      ShoppingListItem, ShoppingListRecipeLink, PantryItem)
 from .scraper import extract_recipe
-from .units import aggregate_ingredients
+from .units import aggregate_ingredients, canonical_key
 from .database import get_session
-from .aisle_seeds import AISLE_SEEDS
+from .aisles import lookup_aisle
+from .parser import parse_ingredient_block
 
-router = APIRouter()
+router = APIRouter()  # v2
+
+
+# ─── Helpers ──────────────────────────────────────────────────────────────────
+
+def _normalize_url(url: str) -> str:
+    """Normalize a URL for duplicate detection."""
+    parsed = urlparse(url.lower().strip())
+    host = parsed.netloc.replace("www.", "")
+    path = parsed.path.rstrip("/")
+    return f"{host}{path}"
 
 
 # ─── Pydantic request/response models ────────────────────────────────────────
@@ -29,6 +40,13 @@ class RecipeUpdateRequest(BaseModel):
     tags: Optional[list[str]] = None
     rating: Optional[int] = None
     servings: Optional[int] = None
+    title: Optional[str] = None
+    ready_in_minutes: Optional[int] = None
+    source: Optional[str] = None
+    instructions: Optional[str] = None
+    ingredients: Optional[list[dict]] = None
+    url: Optional[str] = None
+    image_url: Optional[str] = None
 
 class ListCreateRequest(BaseModel):
     name: str
@@ -53,31 +71,18 @@ class UpdateItemRequest(BaseModel):
     display_quantity: Optional[str] = None
     sort_order: Optional[int] = None
 
-class AisleMappingRequest(BaseModel):
-    name: str
-    aisle: str
+class ParseIngredientsRequest(BaseModel):
+    text: str
 
-class BulkAisleMappingRequest(BaseModel):
-    mappings: list[AisleMappingRequest]
-
-
-# ─── Aisle resolution ─────────────────────────────────────────────────────────
-
-def _load_aisle_mappings(session: Session) -> dict[str, str]:
-    return {row.name: row.aisle for row in session.exec(select(IngredientAisle)).all()}
-
-def _resolve_aisle(name: str, mappings: dict[str, str]) -> str:
-    normalized = name.lower().strip()
-    if normalized in mappings:
-        return mappings[normalized]
-    for key in sorted(mappings, key=len, reverse=True):
-        if re.search(r'\b' + re.escape(key) + r'\b', normalized):
-            return mappings[key]
-    return ""
-
-def _apply_aisles(ingredients: list[dict], session: Session) -> list[dict]:
-    mappings = _load_aisle_mappings(session)
-    return [{**ing, "aisle": _resolve_aisle(ing["name"], mappings)} for ing in ingredients]
+class ManualRecipeRequest(BaseModel):
+    title: str
+    url: Optional[str] = None
+    source: Optional[str] = None
+    ready_in_minutes: Optional[int] = None
+    servings: Optional[int] = None
+    tags: list[str] = []
+    ingredients: list[dict] = []
+    instructions: Optional[str] = None
 
 
 # ─── Tags ─────────────────────────────────────────────────────────────────────
@@ -91,11 +96,84 @@ def tag_suggestions(q: str = Query(""), session: Session = Depends(get_session))
 
 # ─── Recipes ──────────────────────────────────────────────────────────────────
 
+@router.post("/recipes/parse")
+async def parse_ingredients(req: ParseIngredientsRequest):
+    """Parse a raw ingredient block into structured ingredients."""
+    parsed = parse_ingredient_block(req.text)
+    # Add aisle lookup for each ingredient
+    for ing in parsed:
+        ing["aisle"] = await lookup_aisle(ing["name"])
+    return {"ingredients": parsed}
+
+
+@router.post("/recipes/manual")
+async def create_manual_recipe(req: ManualRecipeRequest, session: Session = Depends(get_session)):
+    """Create a recipe from manually entered ingredients."""
+    if not req.title.strip():
+        raise HTTPException(400, detail="Recipe title is required")
+
+    # Add aisle to any ingredients missing it
+    ingredients = []
+    for ing in req.ingredients:
+        if not ing.get("aisle"):
+            ing["aisle"] = await lookup_aisle(ing["name"])
+        ingredients.append(ing)
+
+    recipe = Recipe(
+        url=req.url or "",
+        title=req.title.strip(),
+        image_url=None,
+        servings=req.servings or 4,
+        ready_in_minutes=req.ready_in_minutes,
+        summary=None,
+        rating=None,
+        is_vegetarian=False,
+        is_vegan=False,
+        is_gluten_free=False,
+        is_dairy_free=False,
+        source=req.source,
+        instructions=req.instructions,
+        ingredients_json=json.dumps(ingredients),
+    )
+    session.add(recipe)
+    session.flush()
+
+    for tag_name in req.tags:
+        tag = session.exec(select(Tag).where(Tag.name == tag_name)).first()
+        if not tag:
+            tag = Tag(name=tag_name)
+            session.add(tag)
+            session.flush()
+        link = RecipeTagLink(recipe_id=recipe.id, tag_id=tag.id)
+        session.add(link)
+
+    session.commit()
+    session.refresh(recipe)
+    return _recipe_response(recipe, session)
+
+
 @router.post("/recipes/import")
 async def import_recipe(req: RecipeImportRequest, session: Session = Depends(get_session)):
     """Extract a recipe from a URL via Spoonacular and save it."""
-    data = await extract_recipe(req.url, req.servings_override)
-    data["ingredients"] = _apply_aisles(data["ingredients"], session)
+
+    # Duplicate check on normalized URL
+    normalized = _normalize_url(req.url)
+    existing_recipes = session.exec(select(Recipe)).all()
+    for r in existing_recipes:
+        if _normalize_url(r.url) == normalized:
+            raise HTTPException(400, detail=f"Recipe already exists: {r.title}")
+
+    try:
+        data = await extract_recipe(req.url, req.servings_override)
+    except ValueError as e:
+        raise HTTPException(400, detail=str(e))
+
+    # Title duplicate check as fallback
+    title_match = session.exec(
+        select(Recipe).where(Recipe.title == data["title"])
+    ).first()
+    if title_match:
+        raise HTTPException(400, detail=f"Recipe already exists: {title_match.title}")
 
     recipe = Recipe(
         url=req.url,
@@ -109,10 +187,11 @@ async def import_recipe(req: RecipeImportRequest, session: Session = Depends(get
         is_vegan=data["is_vegan"],
         is_gluten_free=data["is_gluten_free"],
         is_dairy_free=data["is_dairy_free"],
+        instructions=data.get("instructions"),
         ingredients_json=json.dumps(data["ingredients"]),
     )
     session.add(recipe)
-    session.flush()  # get recipe.id before committing
+    session.flush()
 
     # Merge requested tags + auto tags from Spoonacular
     all_tag_names = list(set(req.tags + data.get("auto_tags", [])))
@@ -158,12 +237,25 @@ def update_recipe(recipe_id: int, req: RecipeUpdateRequest, session: Session = D
     recipe = session.get(Recipe, recipe_id)
     if not recipe:
         raise HTTPException(404, "Recipe not found")
+    if req.title is not None:
+        recipe.title = req.title
     if req.rating is not None:
         recipe.rating = req.rating
     if req.servings is not None:
         recipe.servings = req.servings
+    if req.ready_in_minutes is not None:
+        recipe.ready_in_minutes = req.ready_in_minutes
+    if req.source is not None:
+        recipe.source = req.source
+    if req.instructions is not None:
+        recipe.instructions = req.instructions
+    if req.url is not None:
+        recipe.url = req.url
+    if req.image_url is not None:
+        recipe.image_url = req.image_url
+    if req.ingredients is not None:
+        recipe.ingredients_json = __import__('json').dumps(req.ingredients)
     if req.tags is not None:
-        # Remove existing tag links
         existing = session.exec(select(RecipeTagLink).where(RecipeTagLink.recipe_id == recipe_id)).all()
         for link in existing:
             session.delete(link)
@@ -185,15 +277,51 @@ def delete_recipe(recipe_id: int, session: Session = Depends(get_session)):
     recipe = session.get(Recipe, recipe_id)
     if not recipe:
         raise HTTPException(404, "Recipe not found")
-    # Remove any list links first
     links = session.exec(
         select(ShoppingListRecipeLink)
         .where(ShoppingListRecipeLink.recipe_id == recipe_id)
     ).all()
+    affected_list_ids = {link.shopping_list_id for link in links}
     for link in links:
         session.delete(link)
     session.flush()
+    # Rebuild affected lists so this recipe's items don't linger on them
+    for lid in affected_list_ids:
+        _rebuild_list_items(lid, session)
     session.delete(recipe)
+    session.commit()
+    return {"ok": True}
+
+
+# ─── Pantry ───────────────────────────────────────────────────────────────────
+
+class PantryItemRequest(BaseModel):
+    name: str
+
+@router.get("/pantry")
+def get_pantry(session: Session = Depends(get_session)):
+    return session.exec(select(PantryItem).order_by(PantryItem.name)).all()
+
+@router.post("/pantry")
+def add_pantry_item(req: PantryItemRequest, session: Session = Depends(get_session)):
+    name = req.name.strip().lower()
+    if not name:
+        raise HTTPException(400, "Name is required")
+    existing = session.exec(select(PantryItem).where(PantryItem.name == name)).first()
+    if existing:
+        raise HTTPException(400, "Already in pantry")
+    item = PantryItem(name=name)
+    session.add(item)
+    session.commit()
+    session.refresh(item)
+    return item
+
+@router.delete("/pantry/{item_id}")
+def delete_pantry_item(item_id: int, session: Session = Depends(get_session)):
+    item = session.get(PantryItem, item_id)
+    if not item:
+        raise HTTPException(404)
+    session.delete(item)
     session.commit()
     return {"ok": True}
 
@@ -211,8 +339,8 @@ def create_list(req: ListCreateRequest, session: Session = Depends(get_session))
 
 @router.get("/lists")
 def get_lists(session: Session = Depends(get_session)):
-    lists = session.exec(select(ShoppingList)).all()
-    return [_list_summary(l) for l in lists]
+    lists = session.exec(select(ShoppingList).order_by(ShoppingList.updated_at.desc())).all()
+    return [_list_summary(l, session) for l in lists]
 
 
 @router.get("/lists/{list_id}")
@@ -229,8 +357,9 @@ def rename_list(list_id: int, req: ListRenameRequest, session: Session = Depends
     if not lst:
         raise HTTPException(404)
     lst.name = req.name
+    lst.updated_at = datetime.utcnow()
     session.commit()
-    return _list_summary(lst)
+    return _list_summary(lst, session)
 
 
 @router.delete("/lists/{list_id}")
@@ -238,6 +367,16 @@ def delete_list(list_id: int, session: Session = Depends(get_session)):
     lst = session.get(ShoppingList, list_id)
     if not lst:
         raise HTTPException(404)
+    # Delete children explicitly — SQLite reuses row ids, so orphaned items
+    # would otherwise attach themselves to a future list that gets this id.
+    for item in session.exec(
+        select(ShoppingListItem).where(ShoppingListItem.shopping_list_id == list_id)
+    ).all():
+        session.delete(item)
+    for link in session.exec(
+        select(ShoppingListRecipeLink).where(ShoppingListRecipeLink.shopping_list_id == list_id)
+    ).all():
+        session.delete(link)
     session.delete(lst)
     session.commit()
     return {"ok": True}
@@ -266,6 +405,8 @@ def add_recipe_to_list(list_id: int, req: AddRecipeToListRequest, session: Sessi
         )
         session.add(link)
         session.flush()
+    # If already linked (e.g. prior request crashed mid-rebuild), fall through
+    # and rebuild items so the list is consistent
 
     _rebuild_list_items(list_id, session)
     lst.updated_at = datetime.utcnow()
@@ -286,22 +427,30 @@ def remove_recipe_from_list(list_id: int, recipe_id: int, session: Session = Dep
     session.delete(link)
     session.flush()
     _rebuild_list_items(list_id, session)
+    lst = session.get(ShoppingList, list_id)
+    if lst:
+        lst.updated_at = datetime.utcnow()
     session.commit()
     return {"ok": True}
 
 
 @router.post("/lists/{list_id}/items")
-def add_manual_item(list_id: int, req: AddManualItemRequest, session: Session = Depends(get_session)):
+async def add_manual_item(list_id: int, req: AddManualItemRequest, session: Session = Depends(get_session)):
+    lst = session.get(ShoppingList, list_id)
+    if not lst:
+        raise HTTPException(404, "List not found")
+    aisle = req.aisle or await lookup_aisle(req.name)
     item = ShoppingListItem(
         shopping_list_id=list_id,
         name=req.name,
         display_quantity=req.display_quantity,
         unit=req.unit,
         amount=req.amount,
-        aisle=req.aisle,
+        aisle=aisle,
         is_manual=True,
     )
     session.add(item)
+    lst.updated_at = datetime.utcnow()
     session.commit()
     session.refresh(item)
     return item
@@ -314,12 +463,16 @@ def update_item(list_id: int, item_id: int, req: UpdateItemRequest, session: Ses
         raise HTTPException(404)
     if req.is_checked is not None:
         item.is_checked = req.is_checked
+        item.checked_at = datetime.utcnow() if req.is_checked else None
     if req.is_pantry_staple is not None:
         item.is_pantry_staple = req.is_pantry_staple
     if req.display_quantity is not None:
         item.display_quantity = req.display_quantity
     if req.sort_order is not None:
         item.sort_order = req.sort_order
+    lst = session.get(ShoppingList, list_id)
+    if lst:
+        lst.updated_at = datetime.utcnow()
     session.commit()
     return item
 
@@ -330,65 +483,9 @@ def delete_item(list_id: int, item_id: int, session: Session = Depends(get_sessi
     if not item or item.shopping_list_id != list_id:
         raise HTTPException(404)
     session.delete(item)
-    session.commit()
-    return {"ok": True}
-
-
-# ─── Admin: Aisle Mappings ────────────────────────────────────────────────────
-
-@router.get("/admin/aisles")
-def list_aisles(session: Session = Depends(get_session)):
-    return session.exec(
-        select(IngredientAisle).order_by(IngredientAisle.aisle, IngredientAisle.name)
-    ).all()
-
-
-@router.post("/admin/aisles")
-def upsert_aisle(req: AisleMappingRequest, session: Session = Depends(get_session)):
-    name = req.name.lower().strip()
-    row = session.exec(select(IngredientAisle).where(IngredientAisle.name == name)).first()
-    if row:
-        row.aisle = req.aisle.strip()
-    else:
-        row = IngredientAisle(name=name, aisle=req.aisle.strip())
-        session.add(row)
-    session.commit()
-    session.refresh(row)
-    return row
-
-
-@router.post("/admin/aisles/bulk")
-def bulk_upsert_aisles(req: BulkAisleMappingRequest, session: Session = Depends(get_session)):
-    for item in req.mappings:
-        name = item.name.lower().strip()
-        row = session.exec(select(IngredientAisle).where(IngredientAisle.name == name)).first()
-        if row:
-            row.aisle = item.aisle.strip()
-        else:
-            session.add(IngredientAisle(name=name, aisle=item.aisle.strip()))
-    session.commit()
-    return {"upserted": len(req.mappings)}
-
-
-@router.post("/admin/aisles/seed")
-def seed_aisles(session: Session = Depends(get_session)):
-    existing = session.exec(select(IngredientAisle)).first()
-    if existing:
-        return {"skipped": True, "reason": "Aisle mappings already exist"}
-    for name, aisle in AISLE_SEEDS.items():
-        session.add(IngredientAisle(name=name, aisle=aisle))
-    session.commit()
-    return {"seeded": len(AISLE_SEEDS)}
-
-
-@router.delete("/admin/aisles/{name}")
-def delete_aisle(name: str, session: Session = Depends(get_session)):
-    row = session.exec(
-        select(IngredientAisle).where(IngredientAisle.name == name.lower().strip())
-    ).first()
-    if not row:
-        raise HTTPException(404, "Mapping not found")
-    session.delete(row)
+    lst = session.get(ShoppingList, list_id)
+    if lst:
+        lst.updated_at = datetime.utcnow()
     session.commit()
     return {"ok": True}
 
@@ -396,18 +493,23 @@ def delete_aisle(name: str, session: Session = Depends(get_session)):
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
 def _rebuild_list_items(list_id: int, session: Session):
-    """Delete non-manual items and re-aggregate from all recipes on the list."""
-    # Remove existing recipe-derived items
+    """Delete non-manual items and rebuild from all recipes on the list."""
     existing_items = session.exec(
         select(ShoppingListItem)
         .where(ShoppingListItem.shopping_list_id == list_id)
         .where(ShoppingListItem.is_manual == False)
     ).all()
+
+    # Items are one-per-recipe-ingredient, so (recipe, name) identifies a line
+    # across rebuilds — carry checked/pantry state over instead of resetting it.
+    prior: dict[tuple, list] = {}
     for item in existing_items:
+        ids = item.source_recipe_ids
+        key = (ids[0] if ids else None, item.name.strip().lower())
+        prior.setdefault(key, []).append(item)
         session.delete(item)
     session.flush()
 
-    # Get all recipe links
     links = session.exec(
         select(ShoppingListRecipeLink).where(ShoppingListRecipeLink.shopping_list_id == list_id)
     ).all()
@@ -421,17 +523,27 @@ def _rebuild_list_items(list_id: int, session: Session):
         recipe = session.get(Recipe, link.recipe_id)
         if not recipe:
             continue
-        ings = recipe.ingredients
-        # Scale if servings override
-        if link.servings_override and recipe.servings:
-            scale = link.servings_override / recipe.servings
-            ings = [{**i, "amount": i["amount"] * scale} for i in ings]
-        ingredient_lists.append(ings)
+        ingredient_lists.append(recipe.ingredients)
         recipe_ids.append(link.recipe_id)
 
-    aggregated = aggregate_ingredients(ingredient_lists, recipe_ids, _load_aisle_mappings(session))
+    aggregated = aggregate_ingredients(ingredient_lists, recipe_ids)
+
+    # Build word-sets for each pantry entry for fuzzy matching.
+    # "salt" matches "kosher salt"; "black pepper" matches "ground black pepper".
+    pantry_word_sets = [
+        frozenset(re.findall(r'[a-z]+', p.name.lower()))
+        for p in session.exec(select(PantryItem)).all()
+    ]
+
+    def _is_pantry_match(ingredient_name: str) -> bool:
+        words = frozenset(re.findall(r'[a-z]+', ingredient_name.lower()))
+        return any(pw and pw.issubset(words) for pw in pantry_word_sets)
 
     for i, agg in enumerate(aggregated):
+        key = (agg["source_recipe_ids"][0], agg["name"].strip().lower())
+        carried_list = prior.get(key)
+        carried = carried_list.pop(0) if carried_list else None
+
         item = ShoppingListItem(
             shopping_list_id=list_id,
             name=agg["name"],
@@ -439,11 +551,12 @@ def _rebuild_list_items(list_id: int, session: Session):
             unit=agg["unit"],
             amount=agg.get("amount"),
             aisle=agg["aisle"],
-            has_unit_conflict=agg["has_unit_conflict"],
-            source_recipe_ids_json=agg["source_recipe_ids_json"],
-            conflict_details_json=agg["conflict_details_json"],
-            recipe_breakdown_json=agg.get("recipe_breakdown_json", "[]"),
+            source_recipe_ids_json=json.dumps(agg["source_recipe_ids"]),
+            recipe_breakdown_json=json.dumps(agg["recipe_breakdown"]),
             sort_order=i,
+            is_pantry_staple=carried.is_pantry_staple if carried else _is_pantry_match(agg["name"]),
+            is_checked=carried.is_checked if carried else False,
+            checked_at=carried.checked_at if carried else None,
         )
         session.add(item)
 
@@ -467,6 +580,8 @@ def _recipe_response(recipe: Recipe, session: Session) -> dict:
         "is_dairy_free": recipe.is_dairy_free,
         "tags": [t.name for t in tags],
         "ingredients": recipe.ingredients,
+        "source": recipe.source,
+        "instructions": recipe.instructions,
         "created_at": recipe.created_at,
     }
 
@@ -478,25 +593,56 @@ def _list_response(lst: ShoppingList, session: Session) -> dict:
     links = session.exec(
         select(ShoppingListRecipeLink).where(ShoppingListRecipeLink.shopping_list_id == lst.id)
     ).all()
+
     recipes = []
     for link in links:
         recipe = session.get(Recipe, link.recipe_id)
         if recipe:
-            recipes.append({"id": recipe.id, "title": recipe.title, "image_url": recipe.image_url})
+            tags = session.exec(
+                select(Tag).join(RecipeTagLink).where(RecipeTagLink.recipe_id == recipe.id)
+            ).all()
+            recipes.append({
+                "id": recipe.id,
+                "title": recipe.title,
+                "image_url": recipe.image_url,
+                "servings": link.servings_override or recipe.servings,
+                "ready_in_minutes": recipe.ready_in_minutes,
+                "rating": recipe.rating,
+                "tags": [t.name for t in tags],
+            })
+
     return {
         **_list_summary(lst),
         "items": [_item_dict(i) for i in items],
-        "recipe_ids": [r["id"] for r in recipes],
         "recipes": recipes,
     }
 
 
-def _list_summary(lst: ShoppingList) -> dict:
+def _list_summary(lst: ShoppingList, session=None) -> dict:
+    recipe_previews = []
+    item_count = 0
+    if session:
+        links = session.exec(
+            select(ShoppingListRecipeLink).where(ShoppingListRecipeLink.shopping_list_id == lst.id)
+        ).all()
+        for link in links:
+            recipe = session.get(Recipe, link.recipe_id)
+            if recipe:
+                recipe_previews.append({
+                    "id": recipe.id,
+                    "title": recipe.title,
+                    "image_url": recipe.image_url,
+                })
+        item_count = len(session.exec(
+            select(ShoppingListItem).where(ShoppingListItem.shopping_list_id == lst.id)
+        ).all())
     return {
         "id": lst.id,
         "name": lst.name,
         "created_at": lst.created_at,
         "updated_at": lst.updated_at,
+        "recipes": recipe_previews,
+        "item_count": item_count,
     }
 
 
@@ -510,10 +656,10 @@ def _item_dict(item: ShoppingListItem) -> dict:
         "aisle": item.aisle,
         "is_pantry_staple": item.is_pantry_staple,
         "is_checked": item.is_checked,
+        "checked_at": item.checked_at.isoformat() if item.checked_at else None,
         "is_manual": item.is_manual,
-        "has_unit_conflict": item.has_unit_conflict,
         "sort_order": item.sort_order,
+        "sort_key": canonical_key(item.name),
         "source_recipe_ids": item.source_recipe_ids,
-        "conflict_details": item.conflict_details,
-        "recipe_breakdown": json.loads(item.recipe_breakdown_json),
+        "recipe_breakdown": item.recipe_breakdown,
     }

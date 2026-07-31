@@ -4,12 +4,6 @@ from datetime import datetime
 import json
 
 
-class IngredientAisle(SQLModel, table=True):
-    id: Optional[int] = Field(default=None, primary_key=True)
-    name: str = Field(index=True, unique=True)  # normalized lowercase
-    aisle: str
-
-
 class RecipeTagLink(SQLModel, table=True):
     recipe_id: Optional[int] = Field(default=None, foreign_key="recipe.id", primary_key=True)
     tag_id: Optional[int] = Field(default=None, foreign_key="tag.id", primary_key=True)
@@ -34,6 +28,8 @@ class Recipe(SQLModel, table=True):
     is_vegan: bool = False
     is_gluten_free: bool = False
     is_dairy_free: bool = False
+    source: Optional[str] = None       # e.g. "Serious Eats", "Joy of Cooking p.142"
+    instructions: Optional[str] = None # free-form instructions text
     # Store ingredients as JSON string
     ingredients_json: str = Field(default="[]")
     created_at: datetime = Field(default_factory=datetime.utcnow)
@@ -61,29 +57,32 @@ class ShoppingListRecipeLink(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     shopping_list_id: int = Field(foreign_key="shoppinglist.id")
     recipe_id: int = Field(foreign_key="recipe.id")
-    servings_override: Optional[int] = None  # scale recipe to different serving size
+    servings_override: Optional[int] = None
     shopping_list: Optional[ShoppingList] = Relationship(back_populates="recipe_links")
+
+
+class PantryItem(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    name: str = Field(index=True, unique=True)  # stored lowercase for matching
 
 
 class ShoppingListItem(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     shopping_list_id: int = Field(foreign_key="shoppinglist.id")
     name: str
-    # Aggregated/display quantity info
-    display_quantity: Optional[str] = None  # e.g. "3.5 cups" or "28 oz"
+    display_quantity: Optional[str] = None
     unit: Optional[str] = None
     amount: Optional[float] = None
     aisle: Optional[str] = None
     is_pantry_staple: bool = False
     is_checked: bool = False
-    is_manual: bool = False  # user-added vs recipe-derived
-    # Track which recipes contributed (JSON list of recipe_ids)
+    checked_at: Optional[datetime] = None
+    is_manual: bool = False
     source_recipe_ids_json: str = Field(default="[]")
-    # Flag for incompatible unit merge
     has_unit_conflict: bool = False
-    conflict_details_json: str = Field(default="[]")  # raw conflicting entries
-    sort_order: int = 0
+    conflict_details_json: str = Field(default="[]")
     recipe_breakdown_json: str = Field(default="[]")
+    sort_order: int = 0
     shopping_list: Optional[ShoppingList] = Relationship(back_populates="items")
 
     @property
@@ -95,3 +94,8 @@ class ShoppingListItem(SQLModel, table=True):
     def conflict_details(self):
         import json
         return json.loads(self.conflict_details_json)
+
+    @property
+    def recipe_breakdown(self):
+        import json
+        return json.loads(self.recipe_breakdown_json)
