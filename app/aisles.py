@@ -1,5 +1,6 @@
 import httpx
 import os
+import re
 
 # Local ingredient → aisle map for common items
 AISLE_MAP = {
@@ -133,19 +134,44 @@ AISLE_MAP = {
 }
 
 
+# Form words that describe how an item is packaged/sold — these trump the
+# ingredient words entirely ("canned pineapple" belongs in Canned, not Produce).
+_CANNED_MODIFIERS = frozenset({"canned", "tinned", "jarred"})
+
+
 def lookup_aisle_local(name: str) -> str | None:
     """Check local map first. Returns aisle string or None."""
     key = name.lower().strip()
     # Exact match first
     if key in AISLE_MAP:
         return AISLE_MAP[key]
-    # Whole word match with simple singular/plural handling
-    key_words = set(w.rstrip('s') for w in key.split())
+
+    words = [w.rstrip('s') for w in re.findall(r"[a-z]+", key)]
+    if not words:
+        return None
+    word_set = set(words)
+
+    # Packaging modifiers override ingredient matching
+    if word_set & _CANNED_MODIFIERS:
+        return "Canned"
+    if "frozen" in word_set:
+        return "Frozen"
+
+    # Whole-word subset match. Rank candidates so that:
+    # 1. more specific entries win ("chicken broth" beats "chicken")
+    # 2. on ties, the entry matching the head noun (last word) wins
+    #    ("tomato ketchup" -> ketchup/Condiments, not tomato/Produce)
+    head = words[-1]
+    best_score = None
+    best_aisle = None
     for map_key, aisle in AISLE_MAP.items():
         map_words = set(w.rstrip('s') for w in map_key.split())
-        if map_words.issubset(key_words):
-            return aisle
-    return None
+        if map_words.issubset(word_set):
+            score = (len(map_words), 1 if head in map_words else 0)
+            if best_score is None or score > best_score:
+                best_score = score
+                best_aisle = aisle
+    return best_aisle
 
 
 async def lookup_aisle_spoonacular(name: str) -> str:

@@ -53,7 +53,8 @@ BULLET_PATTERN = re.compile(
     r'(?:'
     r'[\u2022\u2023\u25e6\u2043\u2219\u25aa\u25cf\u25cb\u2726\u2713\u2714\u25a2\u25a1\u2610\u2611\u2612]'  # unicode bullets + checkboxes
     r'|[-\*\+\#]'       # ASCII bullets
-    r'|\d+[\.\)]\s*'    # numbered lists like "1." or "1)"
+    r'|\d+\)\s*'        # numbered lists like "1)"
+    r'|\d+\.(?!\d)\s*'  # numbered lists like "1." — but NOT decimals like "1.5 tbsp"
     r'|[a-zA-Z][\.\)]\s*'  # lettered lists like "a." or "a)"
     r')'
     r'[\s]*',           # trailing whitespace after bullet
@@ -107,6 +108,48 @@ def is_likely_instruction(line: str) -> bool:
     return False
 
 
+# Dual metric/imperial measurements like "50g / 2oz baby spinach" or
+# "400g/14oz can chickpeas" (RecipeTin Eats and other sites that list both).
+# We keep the imperial side and drop the other before parsing.
+_METRIC_UNIT_WORDS = frozenset({
+    "g", "gram", "grams", "kg", "kilogram", "kilograms",
+    "ml", "milliliter", "milliliters", "millilitre", "millilitres",
+    "l", "liter", "liters", "litre", "litres",
+})
+_IMPERIAL_UNIT_WORDS = frozenset({
+    "oz", "ounce", "ounces", "lb", "lbs", "pound", "pounds",
+    "cup", "cups", "tbsp", "tbs", "tablespoon", "tablespoons",
+    "tsp", "teaspoon", "teaspoons", "pt", "pint", "pints",
+    "qt", "quart", "quarts", "gal", "gallon", "gallons",
+})
+
+# An amount: "2", "1.5", "1/2", or "1 1/2"
+_DUAL_AMT = r"\d+(?:[.,]\d+)?(?:\s+\d+\s*/\s*\d+)?|\d+\s*/\s*\d+"
+_DUAL_MEASURE_RE = re.compile(
+    rf"(?P<m1>(?:{_DUAL_AMT})\s*(?P<u1>[a-zA-Z]+))\s*/\s*(?P<m2>(?:{_DUAL_AMT})\s*(?P<u2>[a-zA-Z]+))"
+)
+
+
+def prefer_imperial_measurement(line: str) -> str:
+    """
+    Collapse a dual metric/imperial measurement to just the imperial one:
+    "50g / 2oz baby spinach" → "2oz baby spinach".
+    Fractions like "1/2 cup" don't trigger (the slash needs a unit on each side),
+    and same-system pairs are left alone.
+    """
+    match = _DUAL_MEASURE_RE.search(line)
+    if not match:
+        return line
+    u1, u2 = match.group("u1").lower(), match.group("u2").lower()
+    if u1 in _METRIC_UNIT_WORDS and u2 in _IMPERIAL_UNIT_WORDS:
+        chosen = match.group("m2")
+    elif u1 in _IMPERIAL_UNIT_WORDS and u2 in _METRIC_UNIT_WORDS:
+        chosen = match.group("m1")
+    else:
+        return line
+    return (line[:match.start()] + chosen + line[match.end():]).strip()
+
+
 def parse_amount(text: str) -> tuple[float, str]:
     """
     Parse amount string like '1/2', '1 1/2', '2', '¼' into a float.
@@ -132,16 +175,28 @@ def parse_amount(text: str) -> tuple[float, str]:
     amount_str = match.group(1).strip()
     remaining = text[match.end():].strip()
 
+    def _to_float(s: str) -> float:
+        if ' ' in s:
+            parts = s.split()
+            return float(parts[0]) + float(Fraction(parts[1]))
+        if '/' in s:
+            return float(Fraction(s))
+        return float(s)
+
     try:
-        if ' ' in amount_str:
-            parts = amount_str.split()
-            amount = float(parts[0]) + float(Fraction(parts[1]))
-        elif '/' in amount_str:
-            amount = float(Fraction(amount_str))
-        else:
-            amount = float(amount_str)
+        amount = _to_float(amount_str)
     except (ValueError, ZeroDivisionError):
         return 0.0, text
+
+    # Range like "1/2 - 1 tsp" or "2-3 cups": take the upper bound
+    range_match = re.match(r'^[-–—]\s*(\d+\s+\d+/\d+|\d+/\d+|\d+\.?\d*)', remaining)
+    if range_match:
+        try:
+            upper = _to_float(range_match.group(1).strip())
+            amount = max(amount, upper)
+            remaining = remaining[range_match.end():].strip()
+        except (ValueError, ZeroDivisionError):
+            pass
 
     return amount, remaining
 
@@ -290,8 +345,12 @@ def parse_ingredient_line(line: str) -> dict | None:
     if is_likely_instruction(line):
         return None
 
+    # Keep only the imperial half of dual measurements ("50g / 2oz spinach").
+    # The stored `original` below keeps the full raw line.
+    parse_text = prefer_imperial_measurement(line)
+
     # Try to parse amount
-    amount, remaining = parse_amount(line)
+    amount, remaining = parse_amount(parse_text)
 
     # Try to parse unit
     unit, remaining = parse_unit(remaining)

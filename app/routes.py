@@ -12,7 +12,7 @@ from .models import (Recipe, Tag, RecipeTagLink, ShoppingList,
 from .scraper import extract_recipe
 from .units import aggregate_ingredients, canonical_key
 from .database import get_session
-from .aisles import lookup_aisle
+from .aisles import lookup_aisle, lookup_aisle_local
 from .parser import parse_ingredient_block
 
 router = APIRouter()  # v2
@@ -550,7 +550,9 @@ def _rebuild_list_items(list_id: int, session: Session):
             display_quantity=agg["display_quantity"],
             unit=agg["unit"],
             amount=agg.get("amount"),
-            aisle=agg["aisle"],
+            # Recompute from the current aisle map so mapping fixes reach
+            # recipes imported before the fix; stored value is the fallback
+            aisle=lookup_aisle_local(agg["name"]) or agg["aisle"] or "Other",
             source_recipe_ids_json=json.dumps(agg["source_recipe_ids"]),
             recipe_breakdown_json=json.dumps(agg["recipe_breakdown"]),
             sort_order=i,
