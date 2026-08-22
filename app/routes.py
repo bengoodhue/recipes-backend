@@ -519,14 +519,21 @@ def _rebuild_list_items(list_id: int, session: Session):
 
     ingredient_lists = []
     recipe_ids = []
+    scales = []
     for link in links:
         recipe = session.get(Recipe, link.recipe_id)
         if not recipe:
             continue
         ingredient_lists.append(recipe.ingredients)
         recipe_ids.append(link.recipe_id)
+        # Serving multiplier (e.g. 2.0 for a doubled recipe) — shown as a badge,
+        # never multiplied into the amounts
+        if link.servings_override and recipe.servings:
+            scales.append(link.servings_override / recipe.servings)
+        else:
+            scales.append(1.0)
 
-    aggregated = aggregate_ingredients(ingredient_lists, recipe_ids)
+    aggregated = aggregate_ingredients(ingredient_lists, recipe_ids, scales)
 
     # Build word-sets for each pantry entry for fuzzy matching.
     # "salt" matches "kosher salt"; "black pepper" matches "ground black pepper".

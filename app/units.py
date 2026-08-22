@@ -139,17 +139,27 @@ def canonical_key(name: str) -> str:
     return " ".join(words)
 
 
-def aggregate_ingredients(ingredient_lists: list[list[dict]], recipe_ids: list[int]) -> list[dict]:
+def aggregate_ingredients(
+    ingredient_lists: list[list[dict]],
+    recipe_ids: list[int],
+    scales: list[float] | None = None,
+) -> list[dict]:
     """
     Takes multiple lists of ingredients (one per recipe) and flattens them into
     shopping item dicts ready for DB insertion — one item per recipe ingredient,
     no merging. Items are ordered by canonical key so related ingredients from
     different recipes land next to each other on the list.
 
+    `scales` carries each recipe's serving multiplier (e.g. 2.0 for a doubled
+    recipe). Amounts are NOT multiplied — the original text stays as written and
+    the scale is surfaced on the breakdown entry for the UI to badge (e.g. "2x").
+
     Each ingredient dict expected: {name, original?, amount?, unit?, display_quantity?, aisle?}
     """
+    if scales is None:
+        scales = [1.0] * len(recipe_ids)
     result = []
-    for ing_list, recipe_id in zip(ingredient_lists, recipe_ids):
+    for ing_list, recipe_id, scale in zip(ingredient_lists, recipe_ids, scales):
         for ing in ing_list:
             name = (ing.get("name") or "").strip()
             if not name:
@@ -160,6 +170,9 @@ def aggregate_ingredients(ingredient_lists: list[list[dict]], recipe_ids: list[i
                 original = " ".join(
                     p for p in [(ing.get("display_quantity") or "").strip(), name] if p
                 )
+            breakdown = {"recipe_id": recipe_id, "display_quantity": original}
+            if scale and abs(scale - 1.0) > 1e-9:
+                breakdown["scale"] = round(scale, 2)
             result.append({
                 "name": name,
                 "display_quantity": ing.get("display_quantity", ""),
@@ -167,7 +180,7 @@ def aggregate_ingredients(ingredient_lists: list[list[dict]], recipe_ids: list[i
                 "amount": ing.get("amount"),
                 "aisle": ing.get("aisle", ""),
                 "source_recipe_ids": [recipe_id],
-                "recipe_breakdown": [{"recipe_id": recipe_id, "display_quantity": original}],
+                "recipe_breakdown": [breakdown],
             })
 
     result.sort(key=lambda item: (canonical_key(item["name"]), item["name"].lower()))
